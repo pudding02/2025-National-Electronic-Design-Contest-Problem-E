@@ -1,47 +1,45 @@
 {
-  "_说明": "K230 双轴云台追踪 — 运行时配置。改完重启 main.py 生效。以 _ 开头的键是注释, 程序会自动跳过。",
+  "_说明": "MaixCAM2 双轴云台追踪 — 运行时配置。改完重启 main.py 生效。以 _ 开头的键是注释, 程序会自动跳过。",
 
-  "_架构": "左右(yaw)轴 = Emm42_V5.0 闭环步进驱动器(UART3, 串口速度模式); 上下(pitch)轴 = Emm42_V5.0 闭环步进驱动器(UART2, 串口速度模式, 与 yaw 相同逻辑)。两轴独立, 各有死区。",
+  "_架构": "左右(yaw)轴 = Emm42_V5.0 闭环步进驱动器(UART2, 串口速度模式); 上下(pitch)轴 = Emm42_V5.0 闭环步进驱动器(UART3, 串口速度模式, 与 yaw 相同逻辑)。两轴独立, 各有死区。",
 
   "_调参入口": "现场最常动的几个: [motor] reverse(方向) / min_rpm,max_rpm(快慢) / acc(加速) ; [pitch_motor] 同名参数, 两轴同构",
 
-  "_接线": "yaw: GPIO32(Pin37)→驱动器①RXD, GPIO33(Pin40)→驱动器①TXD, 共地, 驱动器①V+独立7~32V; pitch: GPIO5(Pin11)→驱动器②RXD, GPIO6(Pin13)→驱动器②TXD(交叉接), 共地, 驱动器②V+独立7~32V。引脚以 skill/LUSHAN-PI-K230-PINOUT-SKILL.md 第一节 40Pin 图为准",
+  "_接线": "yaw: B0(UART2_TX)→驱动器①RXD, B1(UART2_RX)→驱动器①TXD, 共地, 驱动器①V+独立7~32V; pitch: B2(UART3_TX)→驱动器②RXD, B3(UART3_RX)→驱动器②TXD(交叉接), 共地, 驱动器②V+独立7~32V。引脚以 MaixCAM2 官方引脚图(skill/maixcan2引脚图.md)为准; UART0(A28/A29)是系统日志口勿占用; IO 均 3.3V",
 
   "detection": {
     "_说明": "用哪种检测方式",
     "mode": "cv",
-    "_mode": "cv = 矩形靶标检测(白心+黑边) / yolo = KPU 目标检测(需模型)",
+    "_mode": "cv = 矩形靶标检测(白心+黑边) / yolo = (V11 待移植 maix.nn, 当前自动回退 cv)",
     "detect_every": 1,
     "_detect_every": "跳帧检测: 1=每帧都检测; 2=隔帧检测(帧率翻倍, 但响应慢一拍)"
   },
 
   "camera": {
-    "_说明": "摄像头输出分辨率。须与 1280x720 提示同为 16:9(640x360 = 全幅最大视野; 4:3 会触发 crop 只取中央 75%, 观感放大)。改这里必须同步改 [center] 的 x/y, 否则追踪中心会偏",
-    "csi_id": 2,
-    "_csi_id": "CSI 端口: 庐山派板载 GC2093 在 CSI2(官方例程一致)。缺省会依赖固件默认值, 采集视野偏移(画面偏左)时先核查此项",
+    "_说明": "摄像头输出分辨率(MaixCAM2 maix.camera.Camera 直出)。V12: 640x480 = 屏幕分辨率, 铺满全屏无黑边; 传感器 16:9 被裁成 4:3(水平视野收窄), 目标像素尺寸约 x1.33、面积约 x1.78。改这里必须同步改 [center] 的 x/y, 否则追踪中心会偏",
     "sensor_width": 640,
-    "sensor_height": 360,
-    "fps": 90,
-    "_fps": "摄像头帧率上限; 相机初始化失败时可先降到 30 试"
+    "sensor_height": 480,
+    "fps": 60,
+    "_fps": "摄像头帧率; MaixCAM2(OS04D10) ≤1280x720 支持 60/80, >720p 只有 30。相机初始化失败时可先降到 30 试"
   },
 
   "display": {
-    "_说明": "LCD 显示(ST7701, 800x480)",
-    "lcd_width": 800,
+    "_说明": "LCD 显示(MaixCAM2 自带 640x480 触摸屏; disp.show 默认 FIT_CONTAIN 居中, 画面自动适配)",
+    "lcd_width": 640,
     "lcd_height": 480,
     "show_osd": true,
     "_show_osd": "画面上叠加 dx/dy 和 FPS 文字, 调试时开, 比赛时可关省算力",
     "x_offset": 80,
     "y_offset": 60,
-    "_offset": "画面在 LCD 上的偏移(缺省自动居中); 显示为 1:1 原尺寸直显(无软件放大)",
+    "_offset": "(V11 起废弃) MaixCAM2 显示由 FIT_CONTAIN 自动居中, 偏移不再生效",
     "to_ide": false,
-    "_to_ide": "true=把画面同时推到 CanMV IDE(调试用, 会拖慢帧率)"
+    "_to_ide": "(V11 起废弃) MaixPy 无 CanMV IDE 推图概念; 调试请用 MaixVision"
   },
 
   "center": {
     "_说明": "屏幕中心像素坐标 = 追踪目标点。分辨率改变时必须同步改, 否则云台会稳定停偏",
     "x": 320,
-    "y": 180,
+    "y": 240,
     "_取值": "一般 = sensor_width/2, sensor_height/2",
     "laser_offset_x": 0,
     "laser_offset_y": 0,
@@ -61,9 +59,11 @@
     "dot_radius": 2,
     "_dot": "绿色校准点半径(px); 2≈直径 4px 的小点, 想更明显可调 3~4",
     "touch_rotate": -1,
-    "_rotate": "触摸坐标旋转: -1=设备默认; 若触点方向与屏幕不符(按上却往左/反方向), 依次试 0/1/2/3(0°/90°/180°/270°)",
+    "_rotate": "(V11 起废弃) MaixCAM2 触摸坐标已由系统校准且代码经 resize_map_pos_reverse 映射回图像系, 不再需旋转参数",
     "show_dot": true,
-    "_show_dot": "启动时绿点+按钮是否显示; 运行中点 ● 隐藏(再触摸屏幕任意处唤出)"
+    "_show_dot": "启动时绿点+按钮是否显示; 运行中点 ● 隐藏(再触摸屏幕任意处唤出)",
+    "stale_ms": 800,
+    "_stale_ms": "触摸看门狗(ms): 显示按住却连续这么久没有任何触摸事件时, 判定固件丢了抬手事件、强制补一次松手(修'按钮只能点一次'); 正常按住时手指微动会持续产生事件不受影响; 0=关闭看门狗"
   },
 
   "rectangle": {
@@ -114,7 +114,7 @@
   },
 
   "yolo": {
-    "_说明": "KPU 目标检测(仅当 detection.mode = yolo 时生效)。需先把 .kmodel 放到板子上",
+    "_说明": "目标检测(V11 起待移植到 maix.nn: 模型需转为 AX 格式 .axmodel/.mud, 当前 mode=yolo 会自动回退 cv)。本段参数保留供移植后使用",
     "task": "detect",
     "_task": "detect = 只出检测框 / segment = 检测框 + 填充蒙版",
     "model_path": "/sdcard/kmodel/model_v4.kmodel",
@@ -137,8 +137,8 @@
   "motor": {
     "_说明": "左右(yaw)轴 —— Emm42_V5.0 闭环步进驱动器, 串口「速度模式」。追踪时: |dx| 线性映射成转速, dx 符号定方向; V7.9 起可切 PID 控制(见 pid_* 键, 触屏调参页可实时开关/调参)",
 
-    "enabled": true,
-    "_enabled": "false=完全不初始化(纯视觉调试, 或只让 pitch 工作)",
+    "enabled": false,
+    "_enabled": "true=接入 yaw 驱动器, 上电发使能帧(F3)+stop 后, 每帧按 dx 输出速度指令(F6); false=完全不初始化(纯视觉调试, 或只让 pitch 工作)",
 
     "test_mode": false,
     "_test_mode": "true=不跑视觉, 只做串口在线探测 + 持续旋转自检(验证驱动器接线用); false=正常视觉追踪",
@@ -146,11 +146,11 @@
     "test_rpm": 10,
     "_test_rpm": "仅 test_mode=true 时用: 自检时的持续转速(RPM)",
 
-    "port": 3,
+    "port": 2,
     "baud": 115200,
-    "tx_pin": 32,
-    "rx_pin": 33,
-    "_pins": "K230 TX=GPIO32(Pin37) → 驱动器① RXD; K230 RX=GPIO33(Pin40) → 驱动器① TXD(交叉接)。注意: 一个 UART 控制器只能有一组引脚, 不能与 [pitch_motor] 的 port 相同",
+    "tx_pin": "B0",
+    "rx_pin": "B1",
+    "_pins": "MaixCAM2 TX=B0(UART2_TX, 左侧排针) → 驱动器① RXD; MaixCAM2 RX=B1(UART2_RX) → 驱动器① TXD(交叉接)。注意: 一个 UART 控制器只能有一组引脚, 不能与 [pitch_motor] 的 port 相同",
 
     "addr": 1,
     "_addr": "驱动器串口 ID(1~255), 必须与驱动器 OLED/上位机里设的 ID 一致",
@@ -195,7 +195,7 @@
     "dx_full_px": 150,
     "_dx_full_px": "|dx| 达到此像素值时给到 max_rpm。调小=小偏差就满速(更凶), 调大=转速爬升更平缓",
 
-    "deadband_px": 5,
+    "deadband_px": 0,
     "_deadband_px": "死区(px)。|dx| 小于此值直接停转, 防止在中心附近来回抖。抖动就调大, 对不准则调小",
 
     "reverse": true,
@@ -214,8 +214,8 @@
   "pitch_motor": {
     "_说明": "上下(pitch)轴 —— Emm42_V5.0 闭环步进驱动器, 串口「速度模式」(与 yaw 相同逻辑)。追踪时: |dy| 线性映射成转速, dy 符号定方向; V7.9 起可切 PID 控制(见 pid_* 键, 触屏调参页可实时开关/调参)",
 
-    "enabled": true,
-    "_enabled": "false=完全不初始化(纯视觉调试, 或只让 yaw 工作)",
+    "enabled": false,
+    "_enabled": "true=接入 pitch 驱动器, 上电发使能帧(F3)+stop 后, 每帧按 dy 输出速度指令(F6); false=完全不初始化(纯视觉调试, 或只让 yaw 工作)",
 
     "test_mode": false,
     "_test_mode": "true=不跑视觉, 只做串口在线探测 + 持续旋转自检(验证驱动器接线用); false=正常视觉追踪",
@@ -223,11 +223,11 @@
     "test_rpm": 10,
     "_test_rpm": "仅 test_mode=true 时用: 自检时的持续转速(RPM)",
 
-    "port": 2,
+    "port": 3,
     "baud": 115200,
-    "tx_pin": 5,
-    "rx_pin": 6,
-    "_pins": "K230 TX=GPIO5(Pin11) → 驱动器② RXD; K230 RX=GPIO6(Pin13) → 驱动器② TXD(交叉接)。注意: 一个 UART 控制器只能有一组引脚, 不能与 [motor] 的 port 相同",
+    "tx_pin": "B2",
+    "rx_pin": "B3",
+    "_pins": "MaixCAM2 TX=B2(UART3_TX, 右侧排针) → 驱动器② RXD; MaixCAM2 RX=B3(UART3_RX) → 驱动器② TXD(交叉接)。注意: 一个 UART 控制器只能有一组引脚, 不能与 [motor] 的 port 相同",
 
     "addr": 1,
     "_addr": "驱动器串口 ID(1~255), 必须与驱动器 OLED/上位机里设的 ID 一致",
@@ -266,17 +266,115 @@
     "_clog_reset_on_boot": "V8: true=上电发送清堵转命令(0x0E52, 驱动器撞限位/卡死后恢复); 默认 false",
 
     "min_rpm": 3,
-    "max_rpm": 45,
+    "max_rpm": 20,
     "_rpm": "转速区间(RPM)。|dy|≤deadband_px → 停转; 之后从 min_rpm 线性升到 max_rpm; |dy|≥dy_full_px 时达 max_rpm。整体想更快就调大这两个; min_rpm 太小会『哼着不转』(步进低速扭矩小)",
 
     "dy_full_px": 150,
     "_dy_full_px": "|dy| 达到此像素值时给到 max_rpm。调小=小偏差就满速(更凶), 调大=转速爬升更平缓",
 
-    "deadband_px": 5,
+    "deadband_px": 0,
     "_deadband_px": "死区(px)。|dy| 小于此值直接停转, 防止在中心附近来回抖。抖动就调大, 对不准则调小",
 
-    "reverse": false,
+    "reverse": true,
     "_reverse": "转向和偏差方向相反时改 true(方向反了只改这一个)"
+  },
+
+  "servo": {
+    "_说明": "V16 双舵机云台(FashionStar FSUS 总线舵机, 单总线): yaw=ID0 / pitch=ID1, UART2 B0/B1, 115200, 每帧 cmd25 同步多圈帧。与 [motor]/[pitch_motor] 步进路径互斥(servo.enabled=true 时不初始化步进)。控制: 视觉误差→KF(可选)→增量式 PID→目标角累加→软限位/斜率限制。",
+
+    "enabled": true,
+    "_enabled": "true=舵机路径接管 gimbal_send; false=完全走 [motor]/[pitch_motor] 步进(回滚用)",
+
+    "port": 2,
+    "baud": 115200,
+    "tx_pin": "B0",
+    "rx_pin": "B1",
+    "_pins": "MaixCAM2 B0(UART2_TX) 串 1kΩ 接舵机信号线; B1(UART2_RX) 直连同一信号线; 两舵机信号并联; 必须共地; 舵机 V+ 独立电源(勿用 MaixCAM2 5V)",
+
+    "yaw_id": 0,
+    "pitch_id": 1,
+    "_ids": "默认 yaw=ID0 / pitch=ID1; 实际相反就互换这两项(只改 config, 不用改代码)",
+
+    "yaw_sign": -1,
+    "pitch_sign": 1,
+    "_sign": "方向符号: 目标在右/下、云台却往反方向走时改成 -1; 两个轴独立",
+
+    "yaw_min": -32000.0,
+    "yaw_max": 32000.0,
+    "_yaw_range": "yaw 不做软件限位(连续旋转): ±32000°≈±88 圈, 受协议 int32×0.1 限制(±32767.9°)再大就被截断。没有滑环时线会绕, 长时间单向跟踪前先确认线缆余量; 要恢复限位改回 ±150 之类",
+
+    "pitch_min": -30.0,
+    "pitch_max": 30.0,
+    "_pitch_range": "pitch 软件软限位(°); 参考云台也是 ±30",
+
+    "zero_auto": true,
+    "yaw_zero_deg": 0.0,
+    "pitch_zero_deg": 0.0,
+    "_zero": "软件零点(不写舵机 EEPROM)。zero_auto=true: 启动瞬间把当前姿态记成逻辑 0°(断电不保持, 每次开机都要停在想要的零位上); false: 用 yaw_zero_deg/pitch_zero_deg 作固定偏移(取舵机原始多圈角, 如 pitch=-60)。软限位/搜索/boot_center 都在「逻辑角」= raw - zero 下工作",
+
+    "pid_enabled": true,
+    "_pid_enabled": "true=完整增量 PID(Ki/Kd/Kff 生效); false=纯 P(只 Kp), 现场对比用; 触屏调参页 P 项可切换",
+
+    "yaw_kp": 0.55,
+    "yaw_ki": 0.15,
+    "yaw_kd": 0.012,
+    "yaw_kff": 0.05,
+    "pitch_kp": 0.42,
+    "pitch_ki": 0.12,
+    "pitch_kd": 0.010,
+    "pitch_kff": 0.04,
+    "_pid": "单位: Kp/Kff = (°/s)/px; Ki = (°/s)/(px·s); Kd = (°/s)/(px/s)。首次上机建议 ki=kd=kff=0, 先调 Kp 到能跟不振, 再加 Kd/Ki/Kff。Kp 0.55 时 100px≈55°/s, 时间常数≈0.18s(比 0.18 快 3 倍)。注意: Kff 用 KF 速度, 只有 kf_enabled=true 时才生效",
+
+    "max_dps": 260.0,
+    "_max_dps": "外环角速度上限(°/s); 取舵机实测最大速度的 60~70%",
+
+    "max_step_deg": 10.0,
+    "_max_step": "每帧目标角最大增量(°); 防一帧大跳/长帧放大; 约 max_dps×0.033",
+
+    "boost_px": 160.0,
+    "_boost": "|误差|超过该像素值就直接给 max_dps 满速追(640 宽的四分之一=160px, 对应 x<160 或 x>480); 靠近中心后交回 PID; 0=关闭, 纯 PID",
+
+    "deadband_px": 3,
+    "_deadband": "死区(px): |误差|<=此值输出 0 并清积分; 3px≈0.26°; 抖动就加大, 对不准则减小",
+
+    "i_zone_px": 60,
+    "_i_zone": "积分分离阈值(px): 大误差时不积分, 防 windup; 0=一直积分",
+
+    "interval_ms": 25,
+    "_interval": "舵机走完一帧目标的周期(ms), 约等于视觉帧间隔; 动作卡顿加大, 过冲减小",
+
+    "power_mw": 0,
+    "_power": "功率上限(mW); 0=不限。先 0, 观察电流/温度; 过温/堵转再按型号设 3000~6000",
+
+    "sync": true,
+    "_sync": "true=cmd25 一帧同步两轴(推荐, 30B≈2.6ms); false=两条 cmd13 分开发(调试/兼容用)",
+
+    "_readback": "运行期回读暂未实现(查询是阻塞的, 会丢帧); boot 已读当前角, 需要监控请用 servo.test_mode 或单独脚本",
+
+    "hold_ms": 1500,
+    "_hold": "丢靶后保持最后目标角的时长(ms); 超时转有界搜索; <=0=立即搜索",
+
+    "boot_center": false,
+    "center_ms": 2000,
+    "_boot_center": "true=上电用 center_ms 慢速回 0°(要求上电机械位置大致居中); false(推荐)=读当前角并以当前角为目标, 不跳变",
+
+    "search_enabled": true,
+    "search_dps": 40.0,
+    "search_range_deg": 0.0,
+    "search_dir": 1,
+    "search_max_ms": 0,
+    "_search": "有界搜索: search_range_deg>0 时 yaw 在 ±该值内往返; =0 时不再限幅, 按 yaw_min/max 走(配合放开的 yaw 限位=单向一直转, 只有 log 里方向会翻转)",
+
+    "kf_enabled": false,
+    "kf_q_pos": 0.5,
+    "kf_q_vel": 5.0,
+    "kf_r": 2.0,
+    "kf_lead_s": 0.0,
+    "kf_err_limit": 150,
+    "_kf": "2 状态 KF(位置+速度)平滑视觉误差; 首次上机建议 false, 纯 P/PID 稳定后再开; lead_s>0 用速度做提前量(补延迟)",
+
+    "test_mode": false,
+    "_test_mode": "true=不跑视觉, 只做 ping/读角/±5°点动/同步帧自检(验证 ID/方向/接线), 完成后保持锁力等待退出"
   },
 
   "distance": {
@@ -292,9 +390,9 @@
     "_dist": "有效测距/映射范围(mm): 超出范围按边界值处理(参考任务 500~1500)",
     "laser_x": 322,
     "_laser_x": "激光点X固定坐标(px): 由激光器安装横向偏移决定(参考机=322, 即画面中心320偏右2)",
-    "laser_y_near": 180,
-    "laser_y_far": 190,
-    "_laser_y": "最近/最远距离对应的激光点Y(px): 参考机640x480上为240/250(=画面中心/中心+10); 本机640x360中心180, 故默认180/190。激光器高度偏移不同需实测: 让靶心追到画面中心后看激光落点Y, 近/远各记一次",
+    "laser_y_near": 240,
+    "laser_y_far": 250,
+    "_laser_y": "最近/最远距离对应的激光点Y(px): 参考机640x480上为240/250(=画面中心/中心+10); V12 起本机画面同为640x480, 故默认 240/250。激光器高度偏移不同需实测: 让靶心追到画面中心后看激光落点Y, 近/远各记一次",
     "aim_laser": false,
     "_aim_laser": "true=矩形追踪收敛点改为激光映射点(云台把靶心追到激光落点上, 让激光打中靶心; 此时替代绿点 laser_offset 校准); false=仅显示距离与激光点, 控制行为不变(默认, 先单独验证)"
   },
@@ -307,19 +405,26 @@
     "direction": 1,
     "_direction": "1 / -1 换向",
     "max_ms": 0,
-    "_max_ms": "0=一直找直到发现目标; >0=搜索上限(超时停转)"
+    "_max_ms": "0=一直找直到发现目标; >0=搜索上限(超时停转)",
+    "_V15说明": "下面两键只在 attitude.enabled=true(姿态接管)时生效: 姿态模式下的搜索是「单方向按圈扫」, 用 IMU 积分计 360°, 比 rpm+max_ms 的写死匀速准得多; rpm/max_ms 仍用于姿态关闭时的旧路径",
+    "turns": 0,
+    "_turns": "姿态搜索圈数: 0=不限圈数(一直找, 每转满一圈打印进度); N=转满 N 圈仍未找到就停转, 且不再重启",
+    "dps": 25,
+    "_dps": "姿态搜索的世界角速度(°/s): 内环据此让相机以恒定世界转速扫掠(底座同时也在转也不影响真实扫过的角度)"
   },
 
   "circle": {
-    "_说明": "V10 画圈(纯几何): 画圈模式(触屏 T/C 切换; 引脚可选, 见 [mode_pin])下, 以检测矩形中心为圆心、按靶纸固定几何尺寸推算半径, 光斑沿该圆连续匀速画圆; 无矩形时退为等靶(不发追踪)。不检测红环, 免激光干扰",
+    "_说明": "V14 画圈(透视单应): 画圈模式(触屏 T/C 切换; 引脚可选, 见 [mode_pin])下, 用检测矩形的 4 个真实角点与靶纸物理尺寸(rect_*)建单应矩阵, 把物理中心圆(circle_dia_cm)投影到图像——橙圆与黄点自动跟随矩形透视变形(斜拍时为透视椭圆); 单应退化时自动降级为 V10 正圆推算。无矩形时退为等靶(不发追踪)。不检测红环, 免激光干扰",
     "speed_deg_s": 60,
     "_speed": "画圈角速度(°/s); 越大转得越快",
     "direction": 1,
     "_direction": "1=顺时针(图像坐标, y 向下) / -1=逆时针",
     "pause_px": 120,
     "_pause": "误差门控: 光斑离目标点超过此值(px)时暂停 θ 推进等伺服追上",
-    "radius_bias_px": 0,
-    "_radius_bias": "画圈目标半径修正(px): 几何推算有系统偏差时微调, 让光斑踩在圆线上",
+    "wait_max_ms": 1000,
+    "_wait_max": "到位等待超时(ms): 误差连续超限这么久仍追不上时, 不再死等、继续推进 θ(脱机不接电机/靶心偏心导致远点够不着时, 防黄点钉死在圆上不转); 0=旧行为(不到位就永久停等)",
+    "radius_bias_cm": 0,
+    "_radius_bias": "画圈目标半径修正(cm): 光斑系统性偏内/偏外时微调, 正值加大半径, 让光斑踩在圆线上",
     "paper_w_cm": 29.7,
     "paper_h_cm": 21.0,
     "_paper": "A4 白纸尺寸(cm)",
@@ -327,16 +432,56 @@
     "_tape_w_cm": "白纸外沿黑胶带宽度(cm): 胶带沿纸边粘贴, 遮出白色可见区; rect_* 设 0 时按 paper-2×tape 自动推导白区尺寸",
     "rect_w_cm": 25.6,
     "rect_h_cm": 17.0,
-    "_rect": "白色可见矩形(胶带内沿)尺寸(cm) = find_paper_box 检测框对应的物理尺寸, 半径换算基准; 实测优先(默认直接填实测值), 设 0 则自动用 paper-2×tape 推导(29.7-4=25.7 / 21-4=17)",
+    "_rect": "白色可见矩形(胶带内沿)尺寸(cm) = find_paper_box 检测框对应的物理尺寸, 透视单应的物理平面基准; 实测优先(默认直接填实测值), 设 0 则自动用 paper-2×tape 推导(29.7-4=25.7 / 21-4=17); 若此比例与画面中实际框比例不符, 投影圆会变成椭圆(几何上正确, 说明尺寸需实测修正)",
     "circle_dia_cm": 11.3,
-    "_circle_dia_cm": "中心圆直径(cm), 与白矩形同心; 画圈半径 = (该值/2) × 检测框的 像素/cm 比例(宽高双向求比例取平均, 自动适配90°旋转)"
+    "_circle_dia_cm": "中心圆物理直径(cm), 与白矩形同心; 单应投影到图像后即为画圈半径(透视一致)"
+  },
+
+  "attitude": {
+    "_说明": "V15 姿态稳定(板载 IMU LSM6DSOW, IIC1/0x6B, 免接线)。IMU 与相机同一刚体, 陀螺测到的是「底座转速 + 云台自身转速」之和, 不可分离, 所以不用前馈猜扰动, 而是用 400~650Hz 内环闭环把相机绝对姿态压在视觉给的方位设定值上; 视觉外环只改设定值 θ_ref。enabled=false 时行为与 V14 完全一致([motor] 旧映射/PID/KF/coast 照旧)",
+    "enabled": false,
+    "_enabled": "false(默认)=姿态不接管, 走 [motor] 旧映射; true=内环接管 yaw。触屏调参页 att 项可随时开关(IMU 已初始化时无需重启)",
+    "yaw_sign": 1,
+    "_yaw_sign": "姿态方向符号。上机若发现「越纠越偏/发散」(串口 WARN att err 持续超限), 把本项改成 -1。它已含原来的 motor.reverse, 不必再改 reverse",
+    "tick_period_us": 1500,
+    "_tick_period_us": "内环拍间隔(us): 1500≈650Hz。视觉一帧约 22ms, 200°/s 下帧间会转 4.4°(=50px), 靠它把帧间空白补上",
+    "tick_budget_ms": 6,
+    "_tick_budget_ms": "每帧最多给内环的毫秒数(其余时间留给视觉)。调大=抗扰更好但视觉帧率更低; 6ms 时强扰动下视觉约 30fps",
+    "gyro_dps": 2000,
+    "_gyro_dps": "陀螺量程(°/s): 125/250/500/1000/2000。手甩底座可能超 500, 默认给足 2000; 量程越大分辨率越粗(2000dps 约 0.07°/s/LSB 量级)",
+    "angle_kp": 12.0,
+    "_angle_kp": "角度环 P [(度/秒)/度]: 误差 1° 给 12°/s 的纠正速度, 时间常数约 83ms。越大回中越快, 但太大(>30)会振",
+    "rate_ki": 0.55,
+    "_rate_ki": "速率环积分/扰动观测器增益(0~1): 每拍把多少速率误差计进电机指令。越大抵消底座转速越快, 但延迟一来就振。仿真实测的稳定边界: 延迟≤2拍时 0.7~0.8 可用; 延迟3拍时 ≥0.6 会出现 2~6° 的低频极限环, 0.55 仍收敛(稳态 0.13°)。默认 0.55 = 给未知延迟留余量; 现场若出现低频来回摆动, 先降这一项",
+    "deadband_dps": 3.0,
+    "_deadband_dps": "速率死区(°/s): 需要的转速低于此值就不开步进(防低速「嗒嗒」响/原地颤)。注意 1RPM=6°/s, 所以低于 3°/s 的纠偏一律走通断抖动",
+    "min_pulse_ms": 25,
+    "_min_pulse_ms": "最小脉宽(ms): 零附近通断抖动的抑制, 上一条非零指令没跑满这么久就不许停。换向不受限(抗扰要能立刻反向)",
+    "min_rpm": 1,
+    "_min_rpm": "姿态模式最低转速(RPM): 1RPM=6°/s。别沿用 [motor].min_rpm=5(=30°/s), 那会让小幅纠偏只能靠长通断硬凑、抖动明显; Emm42 闭环不会丢步, 扭矩不足再往上调",
+    "px_per_deg": 0,
+    "_px_per_deg": "像素/度: 0(推荐)=由 [distance].ref_area_px/ref_distance_mm 与 [circle].rect_w_cm 自动反算焦距(免新增标定); 也可手填实测值覆盖。0.5° 的验收线 ≈ 5~8px",
+    "outer_gain": 0.8,
+    "_outer_gain": "视觉外环增益(0~1): 每帧把测量到的像素误差的多少比例计进 θ_ref。1.0=一帧到位但易受检测抖动影响, 0.8 较稳",
+    "outer_lead_s": 0.0,
+    "_outer_lead_s": "外环速度前馈提前量(s): 用误差变化率预测目标下一刻的方位, 补偿检测+显示延迟; 0=关(默认)。动态目标拖尾明显时试 0.05~0.1",
+    "hold_ms": 3000,
+    "_hold_ms": "丢靶后「保持世界方位凝视」的时长(ms): 期间靶标回到画面立即续跟; 超时转单方向按圈搜索; 0=不保持直接搜",
+    "fault_deg": 15.0,
+    "_fault_deg": "发散保护阈值(°): 角度误差连续 300ms 超过此值 → 判定符号/增益配反, 自动关姿态回退旧映射并告警(不会把云台甩飞)",
+    "active_dps": 15.0,
+    "_active_dps": "扰动触发阈值(°/s): 底座转速超过此值才把帧间预算全给内环; 平时只跑 1 拍观测, 视觉帧率不受影响",
+    "tilt_alpha": 0.98,
+    "_tilt_alpha": "倾角互补滤波系数(陀螺权重): 0.98 时陀螺主导、加速度缓慢修正。相机随 pitch 抬头时靠它做 yaw 轴投影修正",
+    "acc": 255,
+    "_acc": "姿态模式 yaw 的加减速档(0~255): 每 +1RPM 用时 (256-acc)×50μs。255≈0.05ms/RPM, 指令建立 <2ms; 姿态模式靠它把「指令→转速」的延迟压到一拍以内。此值只在姿态接管时生效, [motor].acc 是旧路径的值"
   },
 
   "mode_pin": {
-    "_说明": "画圈模式标志位引脚(可选备用): 3.3V(Pin1) -> 跳线 -> GPIO49(Pin3): 被供电=画圈; 拨 GND=仅追踪。默认关闭——模式默认由触屏 T/C 按钮切换; 若要用跳线, 本项改 true(此时触屏 T/C 切换自动让位给引脚)",
+    "_说明": "画圈模式标志位引脚(可选备用): 3.3V -> 跳线 -> A4(右侧排针, SPI1_SCK 丝印位): 被供电=画圈; 拨 GND=仅追踪。默认关闭——模式默认由触屏 T/C 按钮切换; 若要用跳线, 本项改 true(此时触屏 T/C 切换自动让位给引脚)。gpio 填 MaixCAM2 丝印引脚名(字符串)",
     "enabled": false,
     "_enabled": "false=不做引脚检测(模式由触屏 T/C 切换); true=引脚为准(触屏 T/C 切换失效)",
-    "gpio": 49,
+    "gpio": "A4",
     "active_level": 1,
     "_active_level": "1=高电平(被供电)为画圈 / 0=低电平为画圈",
     "debounce_n": 5,

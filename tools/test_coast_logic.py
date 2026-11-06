@@ -55,6 +55,8 @@ def load_coast_step():
         src = f.read()
     fn_src = _extract_func(src, "coast_step")
     env = {"time": _FakeTime()}
+    # V13 起 coast_step 改用 _tdiff(真机 ticks_diff 反号问题), 一并注入
+    exec(_extract_func(src, "_tdiff"), env)
     exec(fn_src, env)
     return env["coast_step"]
 

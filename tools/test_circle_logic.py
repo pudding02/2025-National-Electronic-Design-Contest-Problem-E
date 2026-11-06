@@ -1,26 +1,24 @@
-"""V7 视觉纯函数主机侧测试 —— 提取 main.py 的纯函数并断言其行为。
+"""画圈/搜索/几何纯函数主机侧测试（V10/V14 当前实现）。
 
-背景: V7 功能扩展把「画圈几何 / 上电搜索 / 模式引脚去抖」做成模块级
-纯函数, 便于主机侧(不接 K230 硬件)测试:
-  - point_in_quad      凸四边形包含判定(红环∈矩形 关联用)
-  - classify_blob      红色块分流: 大空心近方=红环 / 其余=None
-  - circle_target_point   画圈目标点(环心+半径+θ -> 像素坐标)
-  - circle_theta_step     画圈 θ 推进(误差门控 + 方向 + 360° 环绕)
-  - search_step           上电搜索状态机(未捕获->spin, 已捕获->idle, 超时->timeout)
-  - mode_pin_step         模式引脚去抖(连续 N 次一致才切换)
+历史: V8.5 的红环检测链（`classify_blob` / `ring_memory_step` / `calib_feed`）已在 V10
+被删除——画圈改为「圆心=矩形中心, 半径按白框/圆物理尺寸比例推算」的纯几何主轨。
+本测试因此不再测已删除函数，改为覆盖当前仍在生产路径上的纯函数:
 
-原理: 从 k230/main.py 中用 AST 提取上述函数源码, 连同它们引用的模块级阈值常量
-(_get / 配置段变量 / RING_MIN_DIAM 等) 一并从 main.py 源码中提取, 在 stub 环境里
-执行(math + stub time + CFG={}), 逐条断言行为与边界。
-      阈值常量一律取自 main.py 本身(测试不注入任何值), 因此 main.py 若漏定义常量
-      (classify_blob 生产会 NameError), 这里会直接报错而非虚假绿灯。
+  - circle_target_point     环心+半径+θ -> 像素点
+  - circle_theta_step       θ 推进(误差门控/等待超时/方向/360° 环绕)
+  - quad_area               四边形面积(shoelace)
+  - search_step             上电搜索状态机
+  - mode_pin_step           模式引脚去抖
+  - geo_radius_px           V10 几何半径
+  - estimate_distance_by_area / laser_position_by_distance  V9 测距/激光点映射
+
+原理: AST 从 k230/main.py 提取函数源码, 在 stub 环境执行; 几何/距离常量从
+k230/config.json 读取(与生产同一组数), 不接硬件、不依赖第三方库。
 
 运行: python tools/test_circle_logic.py
-说明: 纯主机侧运行, 不需要 K230 硬件; 不依赖任何第三方库(stdlib only)。
-      覆盖边界: 只覆盖上述纯函数; 检测链(cv2)/画圈伺服/搜索接线等集成面
-      不在主机测试范围内, 由实机验证覆盖(见计划文件「验证清单」)。
 """
 import ast
+import json
 import math
 import os
 import types
@@ -28,48 +26,16 @@ import unittest
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _MAIN_PY = os.path.normpath(os.path.join(_THIS_DIR, "..", "k230", "main.py"))
+_CFG_JSON = os.path.normpath(os.path.join(_THIS_DIR, "..", "k230", "config.json"))
 
 _FUNC_NAMES = (
-    "point_in_quad", "classify_blob",
-    "circle_target_point", "circle_theta_step", "search_step", "mode_pin_step",
-    "ring_memory_step", "quad_area", "median_of", "calib_feed",
+    "circle_target_point", "circle_theta_step", "quad_area", "search_step",
+    "mode_pin_step", "geo_radius_px",
+    "estimate_distance_by_area", "laser_position_by_distance",
 )
-
-# classify_blob 引用的模块级阈值常量 —— 必须由 main.py 定义; 本测试**不注入**其取值,
-# 而是从 main.py 源码里提取执行, 缺任何一个都会在此暴露(classify_blob 生产会 NameError)。
-_CONST_NAMES = (
-    "RING_MIN_DIAM", "RING_MAX_DIAM", "RING_MAX_ASPECT",
-    "HOLLOW_MAX_HITS",
-)
-# 上述常量取值依赖的模块级名字(也一律从 main.py 提取, 测试不自造值):
-#   _get = 配置取值 helper;  rt = [red_target] 配置段变量
-_PREAMBLE_FUNCS = ("_get",)
-_PREAMBLE_VARS = ("rt",)
-
-
-def _extract_func(src, name):
-    """返回顶层函数源码; 找不到时抛 AssertionError"""
-    tree = ast.parse(src)
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return ast.get_source_segment(src, node)
-    raise AssertionError("k230/main.py 中未找到函数 %s" % name)
-
-
-def _extract_assign(src, name):
-    """返回顶层 `name = ...` 赋值源码; 找不到时抛 AssertionError"""
-    tree = ast.parse(src)
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == name:
-                    return ast.get_source_segment(src, node)
-    raise AssertionError("k230/main.py 中未找到模块级赋值 %s = ..." % name)
 
 
 class _FakeTime(types.ModuleType):
-    """stub MicroPython 的 time 接口"""
-
     def __init__(self):
         super().__init__("time")
 
@@ -77,399 +43,225 @@ class _FakeTime(types.ModuleType):
         return a - b
 
 
-def load_funcs():
-    """加载并返回 main.py 里的 6 个纯函数。
-
-    阈值常量与配置段变量一律从 main.py 源码中提取执行 —— 测试不硬注入任何取值,
-    因此 main.py 若漏定义 classify_blob 引用的常量(生产会 NameError), 这里会直接
-    报错暴露, 而不是靠注入掩盖。
-    """
+def _load_env():
     with open(_MAIN_PY, encoding="utf-8") as f:
         src = f.read()
+    with open(_CFG_JSON, encoding="utf-8") as f:
+        cfg = json.load(f)
+    c = cfg.get("circle", {})
+    d = cfg.get("distance", {})
     env = {
         "math": math,
         "time": _FakeTime(),
-        "CFG": {},          # 主机侧无 config.json: 常量取 main.py 内默认值
+        "_tdiff": lambda a, b: a - b,
+        "RECT_W_CM": c.get("rect_w_cm", 0) or (c.get("paper_w_cm", 29.7)
+                                               - 2.0 * c.get("tape_w_cm", 2.0)),
+        "RECT_H_CM": c.get("rect_h_cm", 0) or (c.get("paper_h_cm", 21.0)
+                                               - 2.0 * c.get("tape_w_cm", 2.0)),
+        "CIRCLE_DIA_CM": c.get("circle_dia_cm", 11.3),
+        "RADIUS_BIAS_CM": c.get("radius_bias_cm", 0.0),
+        "DIST_REF_MM": d.get("ref_distance_mm", 1500),
+        "DIST_REF_AREA": d.get("ref_area_px", 8412),
+        "DIST_MIN": d.get("dist_min_mm", 500),
+        "DIST_MAX": d.get("dist_max_mm", 1500),
+        "LASER_X": d.get("laser_x", 322),
+        "LASER_Y_NEAR": d.get("laser_y_near", 240),
+        "LASER_Y_FAR": d.get("laser_y_far", 250),
     }
-    # 1) 常量取值依赖的 helper / 配置段变量(同样只从 main.py 取, 缺席即留给第 2 步报错)
-    for fname in _PREAMBLE_FUNCS:
-        exec(_extract_func(src, fname), env)
-    for vname in _PREAMBLE_VARS:
-        try:
-            exec(_extract_assign(src, vname), env)
-        except AssertionError:
-            pass
-    # 2) classify_blob 引用的阈值常量(缺任一个即报错)
-    missing_const = []
-    for cname in _CONST_NAMES:
-        try:
-            exec(_extract_assign(src, cname), env)
-        except AssertionError:
-            missing_const.append(cname)
-    if missing_const:
-        raise AssertionError(
-            "k230/main.py 缺少模块级常量: %s (classify_blob 引用但未定义 → 生产会 NameError)"
-            % ", ".join(missing_const))
-    # 3) 纯函数
-    fns = {}
-    missing = []
-    for name in _FUNC_NAMES:
-        try:
-            exec(_extract_func(src, name), env)
-        except AssertionError:
-            missing.append(name)
-            continue
-        fns[name] = env[name]
-    if missing:
-        raise AssertionError("k230/main.py 缺少函数: %s (未实现或改名)" % ", ".join(missing))
-    return fns
+    tree = ast.parse(src)
+    found = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in _FUNC_NAMES:
+            exec(ast.get_source_segment(src, node), env)
+            found.add(node.name)
+    missing = set(_FUNC_NAMES) - found
+    assert not missing, "k230/main.py 缺函数: %s" % sorted(missing)
+    return env
 
 
-_FNS = None
+E = _load_env()
 
 
-def F(name):
-    """懒加载 6 个纯函数(全部加载成功才缓存)"""
-    global _FNS
-    if _FNS is None:
-        _FNS = load_funcs()
-    return _FNS[name]
+class TestCircleTargetPoint(unittest.TestCase):
+    def test_zero(self):
+        self.assertEqual(E["circle_target_point"](100, 100, 50, 0), (150, 100))
+
+    def test_90(self):
+        self.assertEqual(E["circle_target_point"](100, 100, 50, 90), (100, 150))
+
+    def test_180(self):
+        self.assertEqual(E["circle_target_point"](100, 100, 50, 180), (50, 100))
+
+    def test_270(self):
+        self.assertEqual(E["circle_target_point"](100, 100, 50, 270), (100, 50))
+
+    def test_360_wraps_to_zero(self):
+        self.assertEqual(E["circle_target_point"](100, 100, 50, 360), (150, 100))
+
+    def test_rounding(self):
+        # 45° -> 100 + 50*0.7071 = 135.36 -> 135
+        self.assertEqual(E["circle_target_point"](100, 100, 50, 45), (135, 135))
 
 
-class TestPointInQuad(unittest.TestCase):
-    """凸四边形包含判定(叉积同号法); 点恰在边上视为在内"""
+class TestCircleThetaStep(unittest.TestCase):
+    def test_dt_zero_noop(self):
+        self.assertEqual(E["circle_theta_step"](10.0, 60, 0, 1, 0, 100, 0, 0),
+                         (10.0, 0))
 
-    QUAD = [(10, 10), (110, 10), (110, 110), (10, 110)]
+    def test_forward(self):
+        th, w = E["circle_theta_step"](0.0, 60, 1000, 1, 0, 100, 0, 0)
+        self.assertAlmostEqual(th, 60.0)
+        self.assertEqual(w, 0)
 
-    def test_inside(self):
-        self.assertTrue(F("point_in_quad")(60, 60, self.QUAD))
+    def test_backward_wrap(self):
+        th, _ = E["circle_theta_step"](10.0, 60, 1000, -1, 0, 100, 0, 0)
+        self.assertAlmostEqual(th, 310.0)
 
-    def test_outside_four_sides(self):
-        for px, py in ((-10, 60), (120, 60), (60, -5), (60, 115)):
-            self.assertFalse(F("point_in_quad")(px, py, self.QUAD), (px, py))
+    def test_forward_wrap(self):
+        th, _ = E["circle_theta_step"](350.0, 60, 1000, 1, 0, 100, 0, 0)
+        self.assertAlmostEqual(th, 50.0)
 
-    def test_on_edge_is_inside(self):
-        self.assertTrue(F("point_in_quad")(10, 60, self.QUAD))
+    def test_pause_freezes_theta_and_accumulates_wait(self):
+        th, w = E["circle_theta_step"](10.0, 60, 100, 1, 150, 100, 40, 0)
+        self.assertAlmostEqual(th, 10.0)
+        self.assertEqual(w, 140)
 
-    def test_tilted_diamond(self):
-        quad = [(50, 10), (110, 60), (50, 110), (0, 60)]
-        self.assertTrue(F("point_in_quad")(50, 60, quad))
-        self.assertFalse(F("point_in_quad")(15, 15, quad))
+    def test_pause_timeout_resumes(self):
+        # 已等 90ms, 本帧 20ms -> 110 >= wait_max 100, 继续推进
+        th, w = E["circle_theta_step"](10.0, 60, 20, 1, 150, 100, 90, 100)
+        self.assertAlmostEqual(th, 11.2)
+        self.assertEqual(w, 110)
 
-
-class TestClassifyBlob(unittest.TestCase):
-    """红色块分流: 大空心近方->ring; 小尺寸/实心/畸形->None(红点识别已删除, 小团不再判 dot)"""
-
-    def test_big_hollow_ring(self):
-        self.assertEqual(F("classify_blob")(60, 60, 0), "ring")
-
-    def test_hollow_boundary_rejected(self):
-        self.assertEqual(F("classify_blob")(60, 60, 3), None)
-
-    def test_small_solid_rejected(self):
-        self.assertEqual(F("classify_blob")(30, 30, 8), None)
-
-    def test_big_solid_rejected(self):
-        self.assertEqual(F("classify_blob")(60, 60, 8), None)
-
-    def test_tiny_rejected(self):
-        self.assertEqual(F("classify_blob")(3, 3, 0), None)
-
-    def test_elongated_rejected(self):
-        self.assertEqual(F("classify_blob")(100, 50, 0), None)
-
-    def test_over_size_limit_rejected(self):
-        self.assertEqual(F("classify_blob")(1000, 1000, 1), None)
+    def test_error_inside_gate_resets_wait(self):
+        th, w = E["circle_theta_step"](10.0, 60, 100, 1, 50, 100, 500, 1000)
+        self.assertAlmostEqual(th, 16.0)
+        self.assertEqual(w, 0)
 
 
-class TestCircleGeometry(unittest.TestCase):
-    """画圈几何: 环上目标点 + θ 推进"""
+class TestQuadArea(unittest.TestCase):
+    def test_square(self):
+        self.assertEqual(E["quad_area"]([(0, 0), (4, 0), (4, 4), (0, 4)]), 16)
 
-    def test_target_point_cardinals(self):
-        f = F("circle_target_point")
-        self.assertEqual(f(100, 100, 50, 0), (150, 100))
-        self.assertEqual(f(100, 100, 50, 90), (100, 150))
-        self.assertEqual(f(100, 100, 50, 180), (50, 100))
-        self.assertEqual(f(100, 100, 50, 270), (100, 50))
+    def test_rectangle(self):
+        self.assertEqual(E["quad_area"]([(0, 0), (8, 0), (8, 4), (0, 4)]), 32)
 
-    def test_target_point_negative_angle(self):
-        self.assertEqual(F("circle_target_point")(100, 100, 50, -90), (100, 50))
+    def test_diamond(self):
+        self.assertEqual(E["quad_area"]([(5, 0), (10, 5), (5, 10), (0, 5)]), 50)
 
-    def test_target_point_zero_radius(self):
-        self.assertEqual(F("circle_target_point")(100, 100, 0, 123), (100, 100))
+    def test_degenerate_collinear(self):
+        self.assertEqual(E["quad_area"]([(0, 0), (1, 1), (2, 2), (3, 3)]), 0)
 
-    def test_theta_advance(self):
-        self.assertAlmostEqual(F("circle_theta_step")(10.0, 60, 1000, 1, 0, 120), 70.0)
-
-    def test_theta_frozen_when_error_large(self):
-        self.assertAlmostEqual(F("circle_theta_step")(10.0, 60, 1000, 1, 200, 120), 10.0)
-
-    def test_theta_direction(self):
-        self.assertAlmostEqual(F("circle_theta_step")(10.0, 60, 1000, -1, 0, 120), 310.0)
-
-    def test_theta_wrap(self):
-        self.assertAlmostEqual(F("circle_theta_step")(350.0, 60, 1000, 1, 0, 120), 50.0)
-
-    def test_theta_zero_dt_frozen(self):
-        self.assertAlmostEqual(F("circle_theta_step")(10.0, 60, 0, 1, 0, 120), 10.0)
+    def test_vertex_rotation_invariant(self):
+        self.assertEqual(E["quad_area"]([(4, 0), (4, 4), (0, 4), (0, 0)]), 16)
 
 
 class TestSearchStep(unittest.TestCase):
-    """上电搜索状态机: 未捕获->spin; 已捕获->idle(不再进入); 超时->timeout"""
-
     def test_disabled_idle(self):
-        self.assertEqual(F("search_step")(1000, False, 0, False, False, 0),
+        self.assertEqual(E["search_step"](1000, False, 0, False, False, 0),
                          ("idle", False, 0))
 
     def test_acquired_never_enters(self):
-        self.assertEqual(F("search_step")(1000, True, 500, True, True, 0),
+        self.assertEqual(E["search_step"](1000, True, 500, True, True, 0),
                          ("idle", False, 0))
 
     def test_start(self):
-        self.assertEqual(F("search_step")(5000, False, 0, True, False, 0),
+        self.assertEqual(E["search_step"](5000, False, 0, True, False, 0),
                          ("spin", True, 5000))
 
     def test_continue_keeps_start(self):
-        self.assertEqual(F("search_step")(6000, True, 5000, True, False, 8000),
+        self.assertEqual(E["search_step"](6000, True, 5000, True, False, 8000),
                          ("spin", True, 5000))
 
     def test_timeout_at_boundary(self):
-        self.assertEqual(F("search_step")(13000, True, 5000, True, False, 8000),
+        self.assertEqual(E["search_step"](13000, True, 5000, True, False, 8000),
                          ("timeout", False, 0))
 
     def test_no_timeout_when_unlimited(self):
-        self.assertEqual(F("search_step")(99999999, True, 5000, True, False, 0),
+        self.assertEqual(E["search_step"](99999999, True, 5000, True, False, 0),
                          ("spin", True, 5000))
 
 
 class TestModePinStep(unittest.TestCase):
-    """模式引脚去抖: 连续 need 次一致才切换(有效电平换算在调用方完成)"""
+    def test_stable_keeps_value(self):
+        self.assertEqual(E["mode_pin_step"](False, 0, False, 3), (False, 0))
 
-    def test_switch_after_debounce(self):
-        active, streak = False, 0
-        active, streak = F("mode_pin_step")(active, streak, True, 3)
-        self.assertEqual((active, streak), (False, 1))
-        active, streak = F("mode_pin_step")(active, streak, True, 3)
-        self.assertEqual((active, streak), (False, 2))
-        active, streak = F("mode_pin_step")(active, streak, True, 3)
-        self.assertEqual((active, streak), (True, 0))
+    def test_debounce_first_mismatch(self):
+        self.assertEqual(E["mode_pin_step"](False, 0, True, 3), (False, 1))
+
+    def test_reaches_need_switches(self):
+        self.assertEqual(E["mode_pin_step"](False, 2, True, 3), (True, 0))
 
     def test_bounce_resets_streak(self):
-        active, streak = F("mode_pin_step")(False, 2, False, 3)
-        self.assertEqual((active, streak), (False, 0))
-        active, streak = F("mode_pin_step")(active, streak, True, 3)
-        self.assertEqual((active, streak), (False, 1))
-
-    def test_stable_keeps_value(self):
-        self.assertEqual(F("mode_pin_step")(True, 0, True, 3), (True, 0))
+        self.assertEqual(E["mode_pin_step"](False, 2, False, 3), (False, 0))
 
 
-class TestRingMemory(unittest.TestCase):
-    """ring_memory_step: 画圈环记忆兜底(参考代码"几何优先"思想的混合落地)。
+class TestGeoRadius(unittest.TestCase):
+    def _box(self, w, h):
+        return [(0, 0), (w, 0), (w, h), (0, h)]
 
-    规则: 环可见 → 直通并刷新记忆; 环丢失但 fallback_ms 窗口内且框中心可用
-    → 用 (框中心, 记忆半径) 继续画圈; 过期/无历史/关断 → None(调用方退原行为)。
-    """
+    def test_landscape(self):
+        # 25.6x17cm 在 10px/cm -> s=10 -> 半径 10*11.3/2=56.5 -> 56
+        self.assertEqual(E["geo_radius_px"](self._box(256, 170)), 56)
 
-    def test_ring_visible_refreshes_memory(self):
-        ring = (100, 80, 30)
-        use, mem = F("ring_memory_step")([0, 0, 0, 0], 5000, ring, (90, 70), 800)
-        self.assertEqual(use, ring)
-        self.assertEqual(mem, [100, 80, 30, 5000])
+    def test_rotated_90(self):
+        self.assertEqual(E["geo_radius_px"](self._box(170, 256)), 56)
 
-    def test_fallback_within_window(self):
-        mem = [100, 80, 30, 5000]
-        use, new_mem = F("ring_memory_step")(mem, 5300, None, (90, 70), 800)
-        self.assertEqual(use, (90, 70, 30))       # 框中心 + 记忆半径
-        self.assertEqual(new_mem, mem)            # 兜底不改写记忆(时间戳保持)
-        self.assertEqual(new_mem[3], 5000)
+    def test_zero_box(self):
+        self.assertEqual(E["geo_radius_px"](self._box(0, 0)), 0)
 
-    def test_fallback_at_window_boundary(self):
-        mem = [100, 80, 30, 5000]
-        use, _ = F("ring_memory_step")(mem, 5800, None, (90, 70), 800)
-        self.assertEqual(use, (90, 70, 30))       # 恰在窗口边界(<=)仍有效
-
-    def test_fallback_expired(self):
-        mem = [100, 80, 30, 5000]
-        use, new_mem = F("ring_memory_step")(mem, 5801, None, (90, 70), 800)
-        self.assertIsNone(use)
-        self.assertEqual(new_mem, mem)
-
-    def test_fallback_disabled_returns_none(self):
-        mem = [100, 80, 30, 5000]
-        use, _ = F("ring_memory_step")(mem, 5100, None, (90, 70), 0)
-        self.assertIsNone(use)                    # fallback_ms=0 → 原行为(不兜底)
-
-    def test_no_history_not_fallback(self):
-        use, _ = F("ring_memory_step")([0, 0, 0, 0], 5000, None, (90, 70), 800)
-        self.assertIsNone(use)                    # 从未见过环 → 无从兜底
-
-    def test_no_box_not_fallback(self):
-        mem = [100, 80, 30, 5000]
-        use, _ = F("ring_memory_step")(mem, 5100, None, None, 800)
-        self.assertIsNone(use)                    # 框也丢了 → 退原行为
+    def test_config_matches(self):
+        self.assertAlmostEqual(E["RECT_W_CM"], 25.6)
+        self.assertAlmostEqual(E["RECT_H_CM"], 17.0)
+        self.assertAlmostEqual(E["CIRCLE_DIA_CM"], 11.3)
 
 
-class TestQuadArea(unittest.TestCase):
-    """quad_area: 四边形面积(shoelace; V8.5 几何主轨的框特征尺寸 = √面积 的来源)"""
+class TestDistanceAndLaser(unittest.TestCase):
+    def test_distance_at_ref(self):
+        self.assertAlmostEqual(E["estimate_distance_by_area"](E["DIST_REF_AREA"]),
+                               float(E["DIST_REF_MM"]))
 
-    def test_square(self):
-        self.assertEqual(F("quad_area")([(0, 0), (4, 0), (4, 4), (0, 4)]), 16)
+    def test_distance_inverse_sqrt(self):
+        area = E["DIST_REF_AREA"] / 4.0
+        self.assertAlmostEqual(E["estimate_distance_by_area"](area),
+                               E["DIST_REF_MM"] * 2.0)
 
-    def test_rectangle(self):
-        self.assertEqual(F("quad_area")([(0, 0), (8, 0), (8, 4), (0, 4)]), 32)
+    def test_distance_invalid_area(self):
+        self.assertEqual(E["estimate_distance_by_area"](0), 0.0)
 
-    def test_tilted_diamond(self):
-        # 对角线 10×10 → 面积 50
-        self.assertEqual(F("quad_area")([(5, 0), (10, 5), (5, 10), (0, 5)]), 50)
+    def test_laser_near(self):
+        self.assertEqual(E["laser_position_by_distance"](E["DIST_MIN"]),
+                         (E["LASER_X"], E["LASER_Y_NEAR"]))
 
-    def test_vertex_rotation_invariant(self):
-        # 顶点顺序轮转不改变面积
-        self.assertEqual(F("quad_area")([(4, 0), (4, 4), (0, 4), (0, 0)]), 16)
+    def test_laser_far(self):
+        self.assertEqual(E["laser_position_by_distance"](E["DIST_MAX"]),
+                         (E["LASER_X"], E["LASER_Y_FAR"]))
 
-    def test_degenerate_collinear(self):
-        self.assertEqual(F("quad_area")([(0, 0), (1, 1), (2, 2), (3, 3)]), 0)
+    def test_laser_mid(self):
+        mid = (E["DIST_MIN"] + E["DIST_MAX"]) // 2
+        x, y = E["laser_position_by_distance"](mid)
+        self.assertEqual(x, E["LASER_X"])
+        self.assertAlmostEqual(y, (E["LASER_Y_NEAR"] + E["LASER_Y_FAR"]) / 2.0,
+                               delta=1)
 
-
-class TestMedianOf(unittest.TestCase):
-    """median_of: 标定样本中位数(抗离群)"""
-
-    def test_empty(self):
-        self.assertEqual(F("median_of")([]), 0.0)
-
-    def test_single(self):
-        self.assertEqual(F("median_of")([3.5]), 3.5)
-
-    def test_odd(self):
-        self.assertEqual(F("median_of")([3, 1, 2]), 2)
-
-    def test_even_averages_middle(self):
-        self.assertEqual(F("median_of")([1, 2, 3, 4]), 2.5)
-
-    def test_unsorted_float(self):
-        self.assertEqual(F("median_of")([5.0, 0.5, 2.0]), 2.0)
-
-    def test_outlier_robust(self):
-        # 单离群值不拉偏中位数(标定抗激光干扰的核心理由)
-        self.assertEqual(F("median_of")([0.4, 0.41, 0.39, 0.40, 9.9]), 0.40)
+    def test_laser_clamps(self):
+        self.assertEqual(E["laser_position_by_distance"](0),
+                         (E["LASER_X"], E["LASER_Y_NEAR"]))
+        self.assertEqual(E["laser_position_by_distance"](999999),
+                         (E["LASER_X"], E["LASER_Y_FAR"]))
 
 
-class TestCalibFeed(unittest.TestCase):
-    """V8.6 渐进标定: ≥ready_n(6) 样本实时可用 / 集满 pool_max 收敛 / ready 前不采纳 k。
-
-    calib_feed(samples, k_now, st, sample, pool_max, ready_n) → (samples, k_now, st, ev)
-    st: 0=未就绪 / 1=ready / 2=final;  ev: 0=无事件 / 1=ready / 2=final
-    """
-
-    def _f(self):
-        return F("calib_feed")
-
-    def test_not_ready_before_six(self):
-        f = self._f()
-        samples, k, st = [], 0.0, 0
-        for i in range(5):
-            samples, k, st, ev = f(samples, k, st, 0.2 + 0.01 * i, 30, 6)
-            self.assertEqual(ev, 0, "第 %d 个样本不应触发事件" % (i + 1))
-        self.assertEqual(st, 0)
-        self.assertEqual(k, 0.0, "ready 前不得采纳 k(防单样本/离群污染)")
-
-    def test_ready_on_sixth_adopts_median(self):
-        f = self._f()
-        samples, k, st = [], 0.0, 0
-        evs = []
-        for i in range(6):
-            samples, k, st, ev = f(samples, k, st, 0.10 + 0.10 * i, 30, 6)
-            evs.append(ev)
-        self.assertEqual(evs[:5], [0, 0, 0, 0, 0])
-        self.assertEqual(evs[5], 1, "第 6 个样本应触发 ready")
-        self.assertEqual(st, 1)
-        # 6 个样本 0.10..0.60 的中位数 = (0.30+0.40)/2 = 0.35
-        self.assertAlmostEqual(k, 0.35)
-
-    def test_k_frozen_between_ready_and_final(self):
-        f = self._f()
-        samples, k, st = [], 0.0, 0
-        for i in range(6):
-            samples, k, st, ev = f(samples, k, st, 0.10 + 0.10 * i, 30, 6)
-        for i in range(23):                       # 第 7..29 个样本
-            samples, k, st, ev = f(samples, k, st, 0.60, 30, 6)
-            self.assertEqual(ev, 0)
-        self.assertAlmostEqual(k, 0.35, msg="ready→final 间不得重算 k")
-        samples, k, st, ev = f(samples, k, st, 0.60, 30, 6)   # 第 30 个
-        self.assertEqual(ev, 2, "集满 pool_max 应触发 final")
-        self.assertEqual(st, 2)
-        self.assertAlmostEqual(k, 0.60, msg="final 应重算中位数(25×0.6 主导)")
-
-    def test_stopped_after_final(self):
-        f = self._f()
-        samples = [0.5] * 30
-        s2, k2, st2, ev = f(samples, 0.5, 2, 0.9, 30, 6)
-        self.assertEqual(ev, 0)
-        self.assertEqual(st2, 2)
-        self.assertEqual(len(s2), 30, "final 后不得再收样本")
-        self.assertAlmostEqual(k2, 0.5)
-
-    def test_ready_n_clamped_to_pool_max(self):
-        f = self._f()
-        samples, k, st = [], 0.0, 0
-        for i in range(4):
-            samples, k, st, ev = f(samples, k, st, 0.2, 4, 6)   # pool_max=4 < ready_n=6
-        self.assertEqual(ev, 1, "ready_n>pool_max 时应按 pool_max 截断")
-        self.assertEqual(st, 1)
-
-    def test_pool_max_zero_no_op(self):
-        f = self._f()
-        s2, k2, st2, ev = f([], 0.0, 0, 0.5, 0, 6)
-        self.assertEqual((s2, k2, st2, ev), ([], 0.0, 0, 0))
-
-
-class TestGeoMainGuards(unittest.TestCase):
-    """V8.5 静态守门: main.py 定义几何主轨参数/接线; config 默认关断(行为不变锚点)"""
-
-    def _src(self):
+class TestStaticGuards(unittest.TestCase):
+    def test_removed_ring_chain_not_reintroduced(self):
         with open(_MAIN_PY, encoding="utf-8") as f:
-            return f.read()
+            src = f.read()
+        for bad in ("def classify_blob", "def ring_memory_step", "def calib_feed"):
+            self.assertNotIn(bad, src, "V10 已删除红环检测链, 勿回退: %s" % bad)
 
-    def test_geo_wired_in_main(self):
-        src = self._src()
-        for name in ("CIRC_RATIO", "CIRC_CALIB_FRAMES", "RED_EN",
-                     "quad_area(", "median_of(", "calib_feed(", "_circle_view"):
-            self.assertIn(name, src, "main.py 缺少 V8.5 接线: %s" % name)
-
-    def test_default_off_in_config(self):
-        import json
-        cfg_path = os.path.normpath(os.path.join(_THIS_DIR, "..", "k230", "config.json"))
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        self.assertEqual(cfg["circle"].get("radius_ratio", -1), 0,
-                         "circle.radius_ratio 默认必须为 0(现状行为)")
-        self.assertEqual(cfg["circle"].get("calib_frames", -1), 30,
-                         "V8.6: calib_frames 默认 30 —— 渐进标定默认开启(用户批准; ≥6 样本实时可用)")
-        self.assertTrue(cfg["red_target"].get("enabled", False),
-                        "red_target.enabled 默认必须为 true(红环检测保持原行为)")
-
-
-class TestModuleThresholdConstants(unittest.TestCase):
-    """回归守门: classify_blob 引用的阈值常量必须在 main.py 中真实定义。
-
-    原缺陷: classify_blob 引用未定义的模块级常量 → 生产调用即 NameError;
-    旧测试把常量取值硬注入 exec 环境, 结构性掩盖了该缺陷。本用例直接断言
-    main.py 的模块级赋值里确实出现这些名字(与上面 TestClassifyBlob 的行为断言互补)。
-    """
-
-    def test_constants_defined_in_main(self):
+    def test_geometry_main_track_wired(self):
         with open(_MAIN_PY, encoding="utf-8") as f:
-            tree = ast.parse(f.read())
-        defined = set()
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                for tgt in node.targets:
-                    if isinstance(tgt, ast.Name):
-                        defined.add(tgt.id)
-        missing = [n for n in _CONST_NAMES if n not in defined]
-        self.assertEqual(
-            missing, [],
-            "k230/main.py 未定义 classify_blob 引用的模块级常量: %s" % missing)
+            src = f.read()
+        for good in ("geo_radius_px", "circle_persp", "quad_area"):
+            self.assertIn(good, src, "V14 几何主轨缺少 %s" % good)
 
 
 if __name__ == "__main__":

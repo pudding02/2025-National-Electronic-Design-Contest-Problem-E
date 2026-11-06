@@ -11,3 +11,13 @@
 # Python 编译缓存（py_compile / import 副产物）
 __pycache__/
 *.pyc
+
+# MaixCAM 应用打包产物（app.yaml / 图标 / dist 里的 zip 都不入库）
+k230/app.yaml
+k230/app.png
+k230/dist/
+*.zip
+
+# 编辑器 / 会话临时产物
+.trae/
+20261016-170004.png

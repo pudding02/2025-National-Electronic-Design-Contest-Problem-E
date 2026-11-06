@@ -1,4 +1,4 @@
-# 电赛E题 — K230 双轴云台追踪系统 (CV/YOLO + 双步进)
+# 电赛E题 — MaixCAM2 双轴云台追踪系统 (CV/YOLO + 双步进/双舵机)
 
 基于 Simple_Tracking_Device 原项目思路的完整复刻：K230-CanMV **单板**完成视觉检测与云台控制，
 双轴执行器均为 **Emm42_V5.0 闭环步进**（42 电机）——左右 yaw 与上下 pitch 都走串口「速度模式」（两轴同逻辑）。
@@ -63,9 +63,8 @@
 │   ├── K230-YOLO-TRAIN-DEPLOY-SKILL.md
 │   └── LUSHAN-PI-K230-PINOUT-SKILL.md     # 40Pin 引脚速查
 ├── 云台/                       # 硬件资料（驱动器说明书 PDF / 上位机 / 历史接线图）
-└── tools/
-    ├── calibrate_laser.py      # 激光/光轴偏移标定
-    └── test_emm_protocol.py    # Emm42 协议帧主机侧自检（对拍说明书例帧）
+└── tools/                      # 主机侧回归测试（不参与部署）
+    └── test_*.py               # 9 套，共 285 例
 ```
 
 ## 一、K230 视觉端部署
@@ -98,6 +97,27 @@ cp model.kmodel /sdcard/model/
 2. 上电后核对串口第一行：`actuator:` 两轴均应 `online`
 3. 首次联调先单轴自检：config 里 `motor.test_mode` / `pitch_motor.test_mode` 置 `true`，不跑视觉只看动作
 
+### 1.4 设备连接与远程登录（MaixCAM2）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 连接方式 | MaixVision（USB 网卡或同一 WiFi） | 左下「连接」，自动发现 `maixcam*` |
+| 设备 IP（本机） | USB 网卡 `10.150.102.1` | 接 USB 线就有，最稳；WiFi 地址 `10.55.95.113` 会随网络/DHCP 变，以 MaixVision 连接页或设备 `hostname -I` 为准 |
+| SSH 账号 | `root` | MaixCAM/MaixCAM2 默认账号 |
+| SSH 密码 | `root` | 出厂默认值；本机曾被改过，2026-11-05 已重置回 `root` |
+
+```bash
+# 电脑上直连设备(密码 root); USB 网卡优先, 不依赖 WiFi
+ssh root@10.150.102.1
+ssh root@10.55.95.113        # 走 WiFi 时(IP 会变, 先确认)
+# 设备上查自己的 IP
+hostname -I
+```
+
+- 密码只以哈希形式存在设备的 `/etc/shadow`，没有明文可查；忘了密码只能重刷系统镜像恢复默认。
+- 远程跑主程序：`scp k230/main.py k230/config.json root@<IP>:/root/` 后 `ssh root@<IP> "cd /root && python3 main.py"`；**别和 MaixVision 同时跑同一个程序**，两者会抢摄像头/UART。
+- 该密码只用于本地调试，不要用在对外网络上。
+
 ## 二、配置文件说明 (config.json)
 
 所有运行参数集中在 `k230/config.json`，改完重启生效。以 `_` 开头的键是注释，程序自动跳过。
@@ -114,9 +134,10 @@ cp model.kmodel /sdcard/model/
 | `motor` | **yaw 轴**：Emm42 速度模式（RPM 区间 / 死区 / 方向 / 使能）；V7.9 PID 参数 `pid_enabled` / `pid_kp` / `pid_ki` / `pid_kd`（见 4.3）；V8 卡尔曼滤波 `kf_*`（见 4.8）与堵转监控 `monitor_ms`（见 4.9）|
 | `pitch_motor` | **pitch 轴**：Emm42 速度模式（与 yaw 同构：min_rpm/max_rpm/dy_full_px/死区/方向）；同含 `pid_*` 键 |
 | `red_target` | **红环检测**（与矩形检测同帧联合进行，画圈模式用）：红色掩膜/环直径/空心验证阈值、ROI 外扩、半径修正；V8.5 总开关 `enabled`（false=完全跳过）|
-| `search` | **上电搜索**：未捕获目标时 yaw 单方向匀速旋转找靶（enabled/rpm/direction/max_ms）|
+| `search` | **上电搜索**：未捕获目标时 yaw 单方向匀速旋转找靶（enabled/rpm/direction/max_ms）；V15 姿态模式下改由 `turns`（圈数，0=一直找）与 `dps`（世界角速度）驱动的**单方向按圈扫**（见 4.10）|
 | `circle` | **画圈运动**：沿红环匀速转圈的角速度/方向/误差门控（speed_deg_s/direction/pause_px）；V8 环丢失记忆兜底 `fallback_ms`、V8.5 几何主轨 `radius_ratio`/`calib_frames`（V8.6 渐进标定默认开，见 4.6）|
 | `mode_pin` | **画圈模式引脚**（GPIO49/Pin3，可选备用，默认关闭）：被供电=画圈；默认由触屏 `T/C` 切换（引脚开启时以引脚为准）|
+| `attitude` | **V15 姿态稳定**（默认 `enabled=false`，关掉即 V14 行为）：内环拍长/预算、角度环 P、速率环积分、死区、`yaw_sign`、`px_per_deg`(0=自动反算)、外环增益、`hold_ms`、发散保护、扫掠触发阈值。现场只需动 `yaw_sign`/`angle_kp`/`rate_ki`/`deadband_dps`（见 4.10），触屏调参页有 `att`/`AKp`/`ADz` 三项 |
 | `debug` | 打印与 GC 节奏 |
 
 ## 三、检测模式（CV / YOLO）
@@ -245,6 +266,112 @@ cp model.kmodel /sdcard/model/
 - **清堵转**：驱动器因撞限位/卡死触发堵转保护后，`clog_reset_on_boot=true` 可上电自动发清堵转命令（0x0E52）恢复。
 - **首次上机核对**：读取类响应字节段为**预期格式**（0x35 预期 6B / 0x36 预期 8B，位置语义待核）；先 `raw_probe(0x35)` / `raw_probe(0x36)` 捕获实测核对，再把样本补进测试固化。无应答/校验错返回 None，不阻塞主循环。
 
+### 4.10 姿态稳定（V15，板载 IMU 内环 + 视觉外环）
+
+针对"云台底座被快速旋转（手转/转台），摄像头要跟住靶心不丢靶"。板载 IMU（MaixCAM2 = **LSM6DSOW**，IIC1/0x6B，acc+gyro，**无磁力计**）与相机在**同一块板、同一刚体**上，免接线。
+
+**为什么不直接"测到扰动就反向补偿"**：IMU 绑在相机上，陀螺测到的是
+`ω_cam = ω_base + m_motor` —— 底座扰动与云台自己的跟踪转动在传感器上**完全混在一起**，无法分离。所以不能用前馈猜扰动，只能闭环控制**相机自身的绝对姿态**：
+
+```
+视觉(45fps)                          内环(≈650Hz, 帧间)
+  dx ──► 外环 ──► θ_ref ───────────► att_step ──► 整数RPM ──► Emm42(yaw)
+         px→°        ▲                  │
+         增量修正      └──── θ_imu ──────┘  ▲
+                                      板载IMU
+```
+
+内环每拍：`ω_base_hat = ω_cam - 6·rpm_prev`（扰动观测器反推底座转速）→ `ω_des = angle_kp·(θ_ref-θ_imu)` → 指令 = 积分器输出。**只在 RPM 变化时写串口**（1RPM=6°/s 的量化天然限流）。
+
+**零点与靶心方位**：无磁力计 → yaw 无绝对基准，所以**上电位置即 0 点**；靶心方位 = 首次锁定时 `θ_imu + dx/px_per_deg`，此后它就是被保持的世界方位。不需要机械原点，也不需要磁力计——考核窗口是"两帧之间的 22ms"，陀螺比例误差 1% 在那段时间只贡献 0.04°。
+
+**px_per_deg 免新增标定**：由 `[distance]`（ref_area_px/ref_distance_mm）与 `[circle]`（rect_w_cm/rect_h_cm）自动反算焦距 `f = 宽像素×距离/物理宽`，再 `px_per_deg = f·π/180`。当前标定值反算 ≈ **11.5 px/deg**，即验收线 0.5° ≈ **5.8px**。要覆盖就填 `[attitude].px_per_deg`。
+
+**丢靶链路（V15 改造）**：`lock`（视觉锁定）→ 丢靶 `hold`（内环把相机钉在 θ_ref 上，`hold_ms` 内**靶标回画面立刻续跟**）→ 超时 `search`（**单方向按圈扫**，用 IMU 积分计 360°，`search.turns=0` 不限圈数、N=转满 N 圈停且不再重启）。搜索时的扫掠是"恒定世界角速度"——底座同时在转也不影响真实扫过的角度。
+
+**仿真实测（`tools/test_attitude_loop.py`，默认增益、1 拍延迟、1RPM 量化）**：
+
+| 扰动 | 峰值偏差 | 稳态偏差 | 结论 |
+|---|---|---|---|
+| 0→200°/s 阶跃 | 0.82°（9.4px） | **0.29°（3.3px）** | 稳态远优于 0.5° 验收线 |
+| ±100°/s 正弦 @0.5Hz | 0.28°（3.2px） | 0.27°（3.1px） | 全程在验收线内 |
+| 5Hz 手抖 ±30°/s | 0.17°（2.0px） | 0.17°（2.0px） | — |
+| 陀螺 1% 比例误差 | 0.82° | 0.29° | 几乎无影响（印证"帧间窗口"论证） |
+| 陀螺 0.5°/s 读数噪声 | 0.82° | 0.27° | 不引起抖动 |
+| 延迟放宽到 3 拍 | 1.72°（19.7px） | 0.14°（1.6px） | 仍收敛 |
+| **`yaw_sign` 配反** | 发散 | — | 由 `fault_deg` 保护在 300ms 内自动降级 |
+
+**增益稳定边界**（仿真实测，`rate_ki` vs 传输延迟）：延迟 ≤2 拍时 0.7~0.8 可用；**延迟 3 拍时 ≥0.6 会振成 2~6° 的极限环**，0.55 仍收敛（稳态 0.13°）。所以默认 `rate_ki=0.55`，给未知延迟留余量——现场若出现**低频来回摆动**，第一件事是把 `rate_ki` 往下调。
+
+**上机顺序（每步都能单独回退）**：
+
+1. 上电看串口 `att:` 行：确认 IMU 型号/`mag=False`；再手转底座看 `ATT th=` 与 `w=` 符号是否一致。
+2. `attitude.enabled=false` 先观察：OSD 左下 `ATT θ d(err) z(ω) 模式`、串口 1Hz `ATT th=... ref=... err=...`，手转底座看 θ 与肉眼转角一致（误差 <1°），据此定 `yaw_sign`。
+3. 开 `attitude.enabled=true`，先把 `outer_gain=0`（纯姿态保持）：手轻转底座，画面里靶标应**纹丝不动**。若越纠越偏 → `yaw_sign` 取反；若低频来回摆 → 降 `rate_ki`。
+4. `outer_gain` 回 0.8：手转 ±90°、来回摆、连续单向转，看串口 `err` 与 OSD 的靶心偏移是否 ≤ 0.5°（≈6px）。
+5. 遮挡靶标 2s（<`hold_ms`）→ 应保持方位并在恢复后 3 帧内续跟；遮挡 >`hold_ms` → 应打印 `HOLD timeout -> SEARCH` 并进入单方向扫掠。
+
+**代价**：强扰动/扫掠/保持时，帧间预算（`tick_budget_ms`，默认 6ms）给内环，视觉帧率从 ~45fps 降到 ~30fps。静止追踪时内环每帧只跑 1 拍，帧率不变。
+
+**注意**：姿态模式用 `[attitude].acc`（默认 255 ≈0.05ms/RPM，让指令在 1 拍内建立），`[motor].acc` 只在关闭姿态时生效；`[attitude].min_rpm` 默认 1（=6°/s），不要沿用 `[motor]` 的 5（=30°/s），否则小幅纠偏只能靠长通断硬凑、抖动明显。
+
+## 四·补、双舵机模式（V16，可选；当前 config 默认开启）
+
+把执行器从「双 Emm42 步进（速度模式）」换成「FashionStar FSUS 总线舵机（位置模式）」，
+由 **MaixCAM2 通过 UART2 单总线直控**（`maix.uart` + `pinmap`，不经过 STM32/庐山派 K230）。
+视觉检测链、画圈、激光标定、触屏校准全部不变；`gimbal_send(dx,dy,dist,status)` 接口不变。
+
+**接线**（详见 `接线图.md` 第零节；`云台/舵机接线图.png` 是旧庐山派 K230 版，已作废）：
+
+```
+MaixCAM2 B0(UART2_TX) --[1kΩ]--+-- 舵机① yaw   ID=0
+MaixCAM2 B1(UART2_RX) ---------+-- 舵机② pitch ID=1   (信号并联)
+GND 共地；舵机 V+ 独立电源（勿用板载 5V）
+```
+
+![MaixCAM2 双舵机接线](云台/舵机接线图_MaixCAM2.png)
+
+**控制**：
+
+- 每帧一帧 `cmd25` 同步多圈帧（子命令 13），两轴绝对目标角同时下发；
+- 外环 `e → KF(可选) → 增量 PID(Kp/Ki/Kd/Kff) → 目标角累加`，舵机内部位置环负责快速跟踪；
+- 死区 3px、每帧最大增量 `max_step_deg`、软限位、积分分离/抗饱和；
+- 上电读当前角并以当前角为目标（不跳变）；丢靶保持 `hold_ms` → 有界往返搜索；
+- 与步进互斥：`servo.enabled=true` 时不初始化 Emm42；回滚把 `servo.enabled=false`、`motor.enabled/pitch_motor.enabled=true`。
+
+**关键配置**（`k230/config.json → [servo]`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | true | 舵机路径总开关 |
+| `yaw_id/pitch_id` | 0/1 | 实际相反就互换 |
+| `zero_auto` | true | 软件零点：启动时把当前姿态记为逻辑 0°（不写舵机 EEPROM，断电不保持） |
+| `yaw_zero_deg/pitch_zero_deg` | 0/0 | `zero_auto=false` 时的固定零点偏移（原始多圈角，如 pitch=-60） |
+| `yaw_sign/pitch_sign` | 1/1 | 越跟越偏就取 -1 |
+| `yaw_min/max` | ±32000° | **yaw 不做软件限位**（连续旋转，≈±88 圈，协议 int32×0.1 上限 ±32767.9°）；没有滑环时线会绕 |
+| `pitch_min/max` | ±30° | 参考云台也是 ±30 |
+| `yaw_kp/pitch_kp` | 0.55/0.42 | (°/s)/px；100px≈55/42°/s（0.18 太慢，实测 3 倍增益仍稳） |
+| `yaw_ki/pitch_ki` | 0.15/0.12 | 消静差/重力下垂；先 0 再逐步加 |
+| `yaw_kd/pitch_kd` | 0.012/0.010 | 抑超调；用 KF 速度，噪声大就减 |
+| `yaw_kff/pitch_kff` | 0.05/0.04 | 速度前馈；需 `kf_enabled=true`（用 KF 速度） |
+| `max_dps` | 260 | 外环角速度上限（原 150 偏慢） |
+| `max_step_deg` | 10 | 每帧目标角最大增量（30fps≈300°/s） |
+| `deadband_px` | 3 | 死区；3px≈0.26° |
+| `interval_ms` | 25 | 舵机走完一帧目标的周期 |
+| `hold_ms/search_*` | 1500 / ±120° | 丢靶保持 → 有界搜索 |
+| `kf_enabled` | false | 首次上机先关，稳定后再开 |
+| `test_mode` | false | true=只做 ping/读角/±5°点动/同步帧自检 |
+
+**首次上机**：
+
+1. 接好单总线/独立电源/共地，确认两舵机 ID=0/1、115200；
+2. `servo.test_mode=true` 跑一次：看 ping、读角、两轴 ±5° 点动、cmd25 同步；
+3. 确认方向（目标在右/下时云台应朝右/下）→ 不对改 `yaw_sign/pitch_sign`；
+4. 确认机械行程 → 把 `yaw_min/max` 设到行程内（先 ±60°，再逐步放大）；
+5. `test_mode=false`，先 `pid_enabled=false`（纯 P）调 `kp`，能跟不振后加 `kd`、`ki`、`kff`，最后开 KF。
+
+**注意**：舵机模式的触屏 `P` 调参页暂未映射（按下会提示改 config）；参数请直接改 `k230/config.json` 的 `[servo]` 段并重启。步进模式的触屏调参页不受影响。
+
 ## 五、激光标定
 
 激光与摄像头光轴不同轴时，标定 `center.laser_offset_x/y`（激光在画面中心右/下为正）。
@@ -286,28 +413,26 @@ cp model.kmodel /sdcard/model/
 
 ### 5.2 主机侧辅助（可选）
 
-```bash
-python tools/calibrate_laser.py
-```
-
 旧方式：把靶标对准画面中心，测激光点相对中心的像素偏移，手填 `config.json` 的
 `center.laser_offset_x/y`（激光在右/下为正）。
 
 ## 六、主机侧自检（不接硬件）
 
 ```bash
+python tools/test_servo_protocol.py  # V16 舵机：FSUS 帧/解析/控制纯函数/servo_send 闭环仿真（35 用例）
 python tools/test_emm_protocol.py    # 协议帧对拍 + V8 读取命令/清堵转帧（24 用例）
 python tools/test_coast_logic.py     # 丢靶预判状态机（10 用例）
-python tools/test_circle_logic.py    # V7/V8.6 纯函数：红环分流/画圈几何/搜索/引脚去抖/记忆兜底/渐进标定（55 用例）
-python tools/test_camera_init.py     # 采集初始化守门：CSI id / 720 提示 / crop 兜底 / config 几何链 / 死显示路径（11 用例）
+python tools/test_circle_logic.py    # V10/V14 几何：画圈点/θ/面积/搜索/引脚/半径/测距激光（41 用例）
+python tools/test_camera_init.py     # MaixCAM2 采集守门：camera.Camera/640x480/center/显示直显/旧 API（11 用例）
 python tools/test_center_calib.py    # V7.7 触屏校准：按钮命中/触摸状态机/config 文本替换/8 键布局（37 用例）
-python tools/test_pid_tune.py        # V7.9 PID+触屏调参：pid_step/参数步进/段内键保存/调参状态机（52 用例）
+python tools/test_pid_tune.py        # V7.9 PID+触屏调参：pid_step/参数步进/段内键保存/调参状态机（59 用例）
 python tools/test_kf_filter.py       # V8 卡尔曼滤波：kf_step 收敛/噪声抑制/lead/限幅/reset + 接线守卫（18 用例）
+python tools/test_attitude_loop.py   # V15 姿态：px/deg、倾角、att_step/outer/turn + 闭环仿真（45 用例）
 ```
 
-七套均为 stdlib 独立脚本，从 `k230/main.py` AST 提取目标函数/常量后断言（不需要硬件、不需要 pytest），合计 207 用例。
-改动协议层先跑第一套；改动视觉/控制/配置面先跑其余几套；再上机。
-（`test_circle_logic.py` 的阈值常量直接取 main.py 定义，若 main.py 漏定义会直接报错。）
+九套均为 stdlib 独立脚本，从 `k230/main.py` AST 提取目标函数/常量后断言（不需要硬件、不需要 pytest），合计 **280 用例**。
+改动协议层先跑 `test_servo_protocol.py` / `test_emm_protocol.py`；改动视觉/控制/配置面先跑其余几套；再上机。
+（`test_servo_protocol.py` 的帧样本取自 `云台/FashionStar_协议完整帧表.md` 与串口实测，改帧构造必须先跑它。）
 
 ## 七、现场部署检查清单
 
@@ -324,6 +449,11 @@ python tools/test_kf_filter.py       # V8 卡尔曼滤波：kf_step 收敛/噪�
 - [ ] 触屏调参核对：`P` 进调参页 → `项`/`+`/`-` 调整（串口打印 `tune: ...`、下一帧生效）；`S` 保存打印 `param: save OK saved 18 keys`，重启后参数保持
 - [ ] 画圈核对：开机后看串口 `CIRCLE autocalib ready: k=...`（环干净时数秒内出现；未出现则查红环检测与 `calib_frames`）；切到画圈模式后应看到橙色合成圆（`OK [geo]`）或蓝色检测圆（`OK [ring]`）并绕环画圆；退化时屏上显示 `CIRCLE: no ring/k`；追踪模式应打印 `OK [rect]`
 - [ ] 不摆靶开机 → yaw 匀速搜索；放靶 1~2 秒内停转进入追踪
+- [ ] **V15 姿态**：上电看 `att:` 行确认 IMU 型号/`mag=False`，手转底座核对 `ATT th=`/`w=` 符号
+- [ ] **V15 姿态**：`attitude.enabled=false` 时 OSD 应显示 `ATT θ d z 模式`、串口 1Hz 有 `ATT th=... err=...`；手转底座 θ 与肉眼转角误差 <1°；据此定 `yaw_sign`
+- [ ] **V15 姿态**：开机串口应打印 `att cfg: on=.. ppd=.. tick=..` 指纹行（没有=板上不是 V15 代码）
+- [ ] **V15 姿态**：开 `enabled=true` 且 `outer_gain=0` 时手转底座，画面靶标应纹丝不动；越纠越偏 → `yaw_sign` 取反
+- [ ] **V15 姿态**：手转 ±90° / 来回摆 / 连续单向转，`err` 与靶心偏移 ≤0.5°（≈6px）；出现低频摆动先降 `rate_ki`
 - [ ] 准备备用 SD 卡（预烧录系统+代码）
 
 ## 八、故障排查
@@ -355,6 +485,13 @@ python tools/test_kf_filter.py       # V8 卡尔曼滤波：kf_step 收敛/噪�
 | 开了 PID 但感觉没变 | 默认 `pid_kp`≈原映射斜率（0.28/0.14），行为接近属正常；用 Ki/Kd 或加大 Kp 拉开差异；确认轴别选错（调参页 `Y/P`）|
 | 调参页 `S` 保存 FAIL | 看串口后缀：`keys not found` → config.json 缺 `pid_*` 新键（用仓库内最新 config.json）；`verify fail` → 写回后读回校验不过，检查文件是否被外部改坏 |
 | UART报 tx not configured | 检查 config 中 `tx_pin`/`rx_pin` 与 FPIOA 映射 |
+| **V15** 姿态没接管（OSD 灰字 `ATT .. idle`）| 串口看 `att:` 行：`固件无 maix.ext_dev.imu` → 固件不支持；`IMU 初始化失败` → 按 S11 查；`att cfg: on=N` → `[attitude].enabled` 还是 false 或触屏 `att` 项没打开 |
+| **V15** 开姿态后云台越纠越偏/自己甩 | `yaw_sign` 配反（它已含 `motor.reverse`，不必再改 reverse）；发散保护会在 300ms 内自动关掉并打印 `att: DISABLED` |
+| **V15** 姿态下低频来回摆动 | 降 `rate_ki`（延迟大时 0.6 以上会形成极限环，见 4.10 稳定边界表）；仍摆再降 `angle_kp` |
+| **V15** 中心附近「嗒嗒」响/原地颤 | `deadband_dps` 调大（默认 3°/s）、`min_pulse_ms` 调大（默认 25ms）；或把 `min_rpm` 保持 1 别再调高 |
+| **V15** 强扰动时视觉帧率掉到 ~30fps | 正常（帧间预算 6ms 让给内环）；嫌低就调小 `tick_budget_ms`，代价是抗扰余量变小 |
+| **V15** 丢靶后不动也不搜 | `hold_ms` 还没到（默认 3000）；`search.turns>0` 且圈数已用完 → 不再重启（重启需重新锁定过目标）；`[search].enabled=false` 也会不搜 |
+| **V15** `px_per_deg` 明显不对（跟随发散/迟滞）| 填 `[attitude].px_per_deg` 覆盖；自动反算依赖 `[distance].ref_area_px/ref_distance_mm` 与 `[circle].rect_w_cm` 的既有标定，标定错了它就跟着错 |
 
 > 串口类问题的完整排障顺序（OLED 状态 → 共地 → 回环测试 → 引脚实测）见 `接线图.md` 第六节。
 

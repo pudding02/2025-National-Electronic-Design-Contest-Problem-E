@@ -4,7 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Drone-competition rectangle-target tracking system (电赛E题). A K230-CanMV board performs computer vision **and drives the gimbal directly** — no intermediate microcontroller. Both axes use Emm42_V5.0 closed-loop stepper drivers with 42 steppers:
+Drone-competition rectangle-target tracking system (电赛E题). A **MaixCAM2** board (MaixPy v4,
+640×480 touch LCD) performs computer vision **and drives the gimbal directly** — no intermediate
+microcontroller. The default actuator (V16) is two **FashionStar FSUS bus servos** on one
+half-duplex UART2 bus; the legacy path is two Emm42_V5.0 closed-loop stepper drivers with 42
+steppers (`servo.enabled=false`).
+
+- **V16 — dual FSUS bus servos (optional; `config.json` default ON)** — `servo.enabled=true`
+  switches the actuator to two FashionStar FSUS servos on one half-duplex **UART2 B0/B1**
+  bus (TX 1kΩ series, IDs yaw=0 / pitch=1, 115200). One `cmd25` sync multi-turn frame per
+  vision frame; outer loop = error → optional KF → **incremental PID** (`yaw_*/pitch_*`
+  `kp/ki/kd/kff`) → absolute target angle, with deadband, `max_step_deg`, soft limits and
+  anti-windup. Boot reads the current angle and holds it (no jump); lost → hold →
+  bounded search. The stepper path is untouched and selected by `servo.enabled=false`;
+  the V15 IMU inner loop is force-disabled in servo mode (650 Hz RPM would saturate the
+  115200 bus). Touch `P` page is **not** mapped for servo yet — tune `[servo]` in
+  `config.json`. New section `[servo]`; wiring in `接线图.md` §0 /
+  `云台/舵机接线图_MaixCAM2.png`; analysis in `云台/双舵机云台改造方案.md`.
 
 - **yaw (left/right)** — UART3, serial **speed mode**: `|dx|` linearly mapped to RPM.
 - **pitch (up/down)** — UART2, serial **speed mode**: identical logic to yaw (`|dy|` → RPM).
@@ -55,39 +71,72 @@ Drone-competition rectangle-target tracking system (电赛E题). A K230-CanMV bo
   line; `monitor_ms>0` prints a stall WARN (warn only, control unaffected); `clog_reset_on_boot`
   optional auto-recovery. **Response byte layouts are expected-only — verify on hardware via
   `raw_probe(0x35)/raw_probe(0x36)` before trusting the parsed values.**
+- **V15 — attitude stabilisation (onboard IMU, default OFF)** — `[attitude]` section. The
+  onboard LSM6DSOW (IIC1/0x6B, acc+gyro, **no magnetometer**) is rigidly on the same board as
+  the camera, so the gyro reads `ω_cam = ω_base + m_motor` and **base disturbance cannot be
+  separated from the gimbal's own tracking motion** — therefore NO feed-forward "measure the
+  disturbance and cancel it". Instead a two-loop structure: the vision outer loop only moves the
+  bearing setpoint `θ_ref` (`att_outer`, px→deg via `px_per_deg`), and an inner loop
+  (`att_step`, 400–650 Hz between vision frames) holds the camera's **absolute** attitude on
+  `θ_ref` using a disturbance observer (`ω_base_hat = ω_cam - 6·rpm_prev`) + angle P.
+  `θ_imu` integrates the de-tilted gyro (`att_yaw_rate`); tilt comes from `att_tilt`
+  (acc+gyro complementary filter). Zero point = power-on attitude; the target bearing is
+  `θ_imu + dx/px_per_deg` at first lock (no magnetometer ⇒ no absolute heading, which is fine
+  because only the 22 ms inter-frame window is graded). `px_per_deg = 0` auto-derives the focal
+  length from the existing `[distance]`/`[circle]` calibration (≈11.5 px/deg at the current
+  numbers ⇒ 0.5° ≈ 5.8 px). Lost target: `lock → hold` (IMU holds the world bearing for
+  `hold_ms`) `→ search` (**single-direction, counted in turns via IMU 360°**, `search.turns`
+  0 = keep looking). RPM is integer ⇒ 1 RPM = 6°/s granularity, so near-zero corrections are
+  dithered under `deadband_dps` + `min_pulse_ms`. Divergence guard: `|err| > fault_deg` for
+  300 ms ⇒ auto-disable and fall back to the legacy mapping. Attitude mode uses its own
+  `[attitude].acc` (255, sub-tick command build-up) and `min_rpm` 1; `[motor].acc/min_rpm` only
+  apply to the legacy path. `enabled=false` ⇒ byte-for-byte V14 behaviour. Implementation detail:
+  the three yaw states are bound to either legacy or attitude implementations **at boot**
+  (`_att_bind`) so the hot path gets no new `if`.
 
 (The original MaixCam + STM32F407 relay architecture is retired — there is no `stm32/` directory and no `fs_servo.py`; all code is single-file in `k230/main.py`.)
 
 ## Architecture
 
 ```
-K230-CanMV (vision + gimbal control)
-    MIPI CSI camera (GC2093)     UART3 → Emm42 driver ① → 42 stepper   [yaw · speed mode]
-    LCD ST7701 800×480           UART2 → Emm42 driver ② → 42 stepper   [pitch · speed mode]
-    Mode switch (GPIO49/Pin3)     touchscreen T/C (default) / jumper: 3.3V = circle (optional)
+MaixCAM2 (MaixPy v4, vision + gimbal control)
+    camera 640×480               UART2 B0/B1 → FSUS servo bus → yaw ID0 / pitch ID1   [V16 default]
+    LCD 640×480 touch            (legacy) UART2/UART3 → Emm42 drivers → 42 steppers
+    mode switch (optional A4)    touchscreen T/C (default) / jumper: 3.3V = circle
 ```
 
 Visual→actuator interface: `gimbal_send(dx, dy, dist, status)` inside `k230/main.py` (section 四).
 
-Camera capture: onboard GC2093 on **CSI2** — `Sensor(id=CSI_ID, …)` + `camera.csi_id: 2`. Chain:
-**1280×720 probe** (1280×960 → view offset 偏左) → **640×360 output** (same 16:9 as probe = full
-FOV; a 4:3 output crops to the central 75% and looks zoomed-in) → **`crop=True`** (stretch safety)
-→ **explicit id**. Display: 1:1 frame pass-through (`show_image(frame, x/y_offset)`; `x/y_offset`
-default to centering). Software upscaling was disproven on hardware (garble/hang) — never
-reintroduce (guarded by `TestNoDeadDisplayPaths`).
+> V16 is the default: one UART2 half-duplex bus + two FSUS servos (IDs 0/1). The stepper path is
+> legacy/rollback (`servo.enabled=false`). See `云台/双舵机云台改造方案.md`,
+> `接线图.md` §0 and `云台/舵机接线图_MaixCAM2.png`.
+
+Camera capture: MaixCAM2 onboard camera — `camera.Camera(SENSOR_W, SENSOR_H,
+image.Format.FMT_BGR888, fps=FPS)` with config **640×480**, `cv2` zero-copy BGR frame;
+display `disp.show(img)` 1:1 on the 640×480 LCD. The old CanMV `Sensor(id=CSI_ID)` /
+1280×720 probe / `crop=True` / `scale_view` chain is retired; software upscaling was
+disproven on hardware (garble/hang) and is guarded by `test_camera_init.py`.
+
+Device access (bench): MaixVision over USB-RNDIS or the same WiFi; SSH `ssh root@<IP>` with
+password **`root`** (factory default; reset on the bench 2026-11-05). The USB
+net address is `10.150.102.1` (stable, preferred); the WiFi address was `10.55.95.113`
+(changes with the network) — confirm with `hostname -I` or the MaixVision connect page.
+Run scripts remotely with `scp ... root@<IP>:/root/` +
+`ssh root@<IP> "python3 /root/x.py"`, never while MaixVision is running another program
+(both grab the camera and UART2). The password lives only as a hash in `/etc/shadow`; see
+README §1.4.
 
 ## Repository structure
 
 ```
 复刻/
 ├── k230/
-│   ├── main.py          # single-file runtime: config load → EmmStepper driver (speed+position)
+│   ├── main.py          # single-file runtime: config load → servo/stepper driver
 │   │                    #   → actuator init + gimbal_send → CV/YOLO detection → main loops
-│   └── config.json      # the sole tuning surface ([motor] = yaw, [pitch_motor] = pitch)
-├── 接线图.md             # authoritative wiring + driver preset tables
+│   └── config.json      # the sole tuning surface ([servo] default; [motor]/[pitch_motor] legacy)
+├── 接线图.md             # authoritative wiring + V16 MaixCAM2 servo diagram
 ├── skill/               # methodology docs (reference only, not runtime)
-└── tools/
-    ├── calibrate_laser.py      # laser/optical offset calibration
+└── tools/               # host-side regression tests only (not deployed)
     ├── test_emm_protocol.py    # host-side frame test (AST-extracts EmmStepper from main.py)
     ├── test_coast_logic.py     # coast state-machine test (AST-extracts coast_step)
     ├── test_circle_logic.py    # V7 pure-function tests (priority/circle/search/pin)
@@ -95,9 +144,9 @@ reintroduce (guarded by `TestNoDeadDisplayPaths`).
     └── test_center_calib.py    # touch-calibration: hit test / touch state machine / config save
 ```
 
-## Critical performance constraints (MicroPython on K230)
+## Critical performance constraints (MicroPython on MaixCAM2)
 
-MicroPython on K230 has no JIT. These anti-patterns cause 5-10x slowdowns on the hot path:
+MicroPython on MaixCAM2 has no JIT. These anti-patterns cause 5-10x slowdowns on the hot path:
 
 1. **Class attribute access** (`self.xxx`) — costs 5-10x more than reading a module-level global.
 2. **Hot-path `if` branches** — each branch check per frame adds up.
@@ -135,6 +184,24 @@ fdx, fdy = kf_update(dx, dy)  # works identically whether Kalman is on or off
   `[circle].calib_frames` (progressive calibration, **default 30 = on**: ≥6 valid ring frames
   make k live)
   and `[red_target].enabled` (default true = ring detection on).
+  **V15 additions**: the `[attitude]` section (18 keys — `enabled` / `yaw_sign` / `tick_period_us` /
+  `tick_budget_ms` / `gyro_dps` / `angle_kp` / `rate_ki` / `deadband_dps` / `min_pulse_ms` /
+  `min_rpm` / `px_per_deg` / `outer_gain` / `outer_lead_s` / `hold_ms` / `fault_deg` / `active_dps` /
+  `tilt_alpha` / `acc`; `enabled` and `angle_kp` + `deadband_dps` are live-tunable on the touch
+  param page as `att` / `AKp` / `ADz`, yaw axis only — `param_next(item, axis)` skips them on
+  pitch) and `[search].turns` / `[search].dps`. The touch `S` button now writes **21** keys.
+  **V16 additions**: `[servo]` section (`enabled` / bus pins / `yaw_id`/`pitch_id` /
+  `yaw_sign`/`pitch_sign` / soft limits / `yaw_*`+`pitch_*` PID / `max_dps` / `max_step_deg` /
+  `deadband_px` / `i_zone_px` / `interval_ms` / `power_mw` / `sync` / `hold_ms` / `search_*` /
+  `kf_*` / `test_mode` / `zero_auto` / `yaw_zero_deg` / `pitch_zero_deg`). `servo.enabled=true`
+  skips the stepper init and rebinds
+  `gimbal_send` to `servo_send`; the touch `P` page is not mapped for servo yet — edit
+  `[servo]` and restart.
+  **Software zero**: internal targets/limits/search live in a "logical" frame where the
+  software zero is 0°; `_servo_send_targets` / `_servo_boot_send` add `_s_off_y` / `_s_off_p`
+  (raw = logical + offset) and `_servo_init` sets the offsets from `zero_auto` (capture the
+  boot pose) or the fixed `yaw_zero_deg`/`pitch_zero_deg`. Nothing is written to the servo
+  EEPROM, so a power cycle re-captures the zero; `cmd17` is not used by `main.py`.
 - The config loader strips keys starting with `_`, so comments can be embedded as `"_说明": "..."`.
 - Values are read at import time into module-level globals; restart `main.py` after edits.
 
@@ -154,23 +221,24 @@ fdx, fdy = kf_update(dx, dy)  # works identically whether Kalman is on or off
 
 ## Testing
 
-- **Host-side (no hardware)**: seven stdlib-only scripts, all static-check `k230/main.py`
+- **Host-side (no hardware)**: nine stdlib-only scripts, all static-check `k230/main.py`
   (some also read `k230/config.json`):
   - `python tools/test_emm_protocol.py` — frame bytes vs manual examples + V8 read-command /
     clog-reset frames & reply parsing (24 cases). Always run after touching protocol code.
   - `python tools/test_coast_logic.py` — coast (lost-target pre-judgment) state machine (10 cases).
-  - `python tools/test_circle_logic.py` — V7/V8.6 pure functions (55 cases): quad containment,
-    ring blob classify, circle geometry, search & pin-debounce machines, ring_memory_step,
-    quad_area (shoelace), median_of, calib_feed (progressive calibration: ready/final/k-freeze).
-    Threshold constants are extracted from main.py itself — a missing definition is a hard error.
-  - `python tools/test_camera_init.py` — capture guard: explicit `id=CSI_ID`, 1280×720
-    probe + `crop=True`, `CSI_ID` defined; config chain: `csi_id=2`, 16:9 output, offsets;
-    dead-display-path guard (`cv2.resize` / `draw_image` / `image.Image` / `bind_layer` /
-    `config_layer`).
+  - `python tools/test_circle_logic.py` — V10/V14 geometry (41 cases): circle point/θ
+    gating + wait timeout, quad area (shoelace), search & pin-debounce machines,
+    `geo_radius_px` (25.6×17 / Ø11.3), distance-by-area + laser mapping. The old
+    V8.5 ring-detection tests (`classify_blob` / `ring_memory_step` / `calib_feed`)
+    were retired with the V10 red-ring removal.
+  - `python tools/test_camera_init.py` — MaixCAM2 capture guard (11 cases):
+    exactly one `camera.Camera(SENSOR_W, SENSOR_H, FMT_BGR888, fps=FPS)`, config
+    640×480 + center half, display 1:1, exactly one `disp.show`, no legacy
+    `Sensor/set_framesize/CSI_ID`, dead-display-path guard.
   - `python tools/test_center_calib.py` — touch calibration (37 cases): 8-button layout (incl. P),
     button hit test, touch state machine (wake edge / repeat / no-bounce on hide / same-button
     debounce guard), config text save (exactly 2 lines).
-  - `python tools/test_pid_tune.py` — V7.9 PID + touch tuning (52 cases): pid_step (P/I/D,
+  - `python tools/test_pid_tune.py` — V7.9 PID + touch tuning (59 cases): pid_step (P/I/D,
     clamp, anti-windup, first-frame/long-frame dt), pid_speed, param step/clamp/toggle,
     section-scoped config text save (motor vs pitch_motor isolation, real-config roundtrip),
     tuning state machine (plus/minus repeat + same-button debounce), static guards (tune vars
@@ -178,9 +246,30 @@ fdx, fdy = kf_update(dx, dy)  # works identically whether Kalman is on or off
   - `python tools/test_kf_filter.py` — V8 Kalman filter (18 cases): kf_step convergence / noise
     suppression / step response / dt guards / lead feed-forward / clamping / reset, plus static
     guards (KF vars defined; gimbal_send wired to kf_step; kf_enabled defaults false).
+  - `python tools/test_attitude_loop.py` — **V15 attitude (45 cases)**: px↔deg focal derivation,
+    tilt complementary filter, de-tilt yaw projection, `att_step` (deadband/min/max/fault/sign
+    symmetry), `att_gate` min-pulse, `att_outer` gain/deadband/lead clamp, `att_turn_step`
+    turn counting — **plus a closed-loop simulation** (base rate + motor rate = camera rate,
+    with 1-RPM quantization, transport delay, gyro scale error and noise) asserting the
+    measured pixel/angle error stays inside the 0.5° acceptance line and that the wrong
+    `yaw_sign` diverges (which is what the fault guard exists for). Static guards: attitude
+    vars defined, inner loop wired, yaw dispatch has no inline `if ATT_EN`, `attitude.enabled`
+    defaults false, `search.turns` defaults 0.
+  - `python tools/test_servo_protocol.py` — **V16 servo (40 cases)**: FSUS frame bytes vs
+    protocol samples (ping / cmd8 / cmd13 / cmd25 sync / cmd18 stop), signed i32 + 0.1°
+    encoding, response parse, `servo_pid` / `servo_step_target` / `servo_search_step` /
+    `servo_boost`
+    (deadband / clamp / anti-windup / integral separation / no-jump search / 1-4 screen boost),
+    a stub
+    closed-loop simulation of `servo_send` (target updates + sync frame contents + hold/search),
+    software-zero offset (frame angle = logical target + offset, boot frame offset), plus static
+    guards (`[servo]` config incl. zero keys, stepper disabled, `servo_send` wired to PID/KF).
+- All nine suites currently pass: **285 cases** total (servo 40, emm 24, coast 10, circle 41,
+  camera 11, center_calib 37, pid_tune 59, kf 18, attitude 45).
 - **Hardware**: `motor.test_mode` / `pitch_motor.test_mode` in config.json perform power-on
   self-checks (online probe + continuous rotation) without running vision. `main.py` also
-  self-reports at boot: the `actuator:` line (both axes + online voltage).
+  self-reports at boot: the `actuator:` line (both axes + online voltage). V16 adds
+  `servo.test_mode` (ping / read angle / ±5° jog / cmd25 sync).
 
 ## Detection modes
 
@@ -201,12 +290,14 @@ fdx, fdy = kf_update(dx, dy)  # works identically whether Kalman is on or off
 | Verify | ROI-only black-border and white-center checks (not full-image) |
 | Runtime | GC every N frames, print every N frames (both configurable) |
 
-## UART pin map (standard edition 40-pin header)
+## UART pin map (MaixCAM2)
 
-| Axis | UART | TX | RX | Driver |
+| Path | UART | TX | RX | Device |
 |---|---|---|---|---|
-| yaw | UART3 | GPIO32 (Pin37) | GPIO33 (Pin40) | ① (speed mode) |
-| pitch | UART2 | GPIO5 (Pin11) | GPIO6 (Pin13) | ② (speed mode) |
+| V16 servo yaw | UART2 | B0 | B1 | FSUS servo ID0 (one half-duplex bus) |
+| V16 servo pitch | UART2 | B0 | B1 | FSUS servo ID1 (same bus) |
+| legacy yaw stepper | UART2 | B0 | B1 | Emm42 driver ① |
+| legacy pitch stepper | UART3 | B2 | B3 | Emm42 driver ② |
 
-One UART controller can only own one pin set — never configure both axes on the same `port`
-(the program prints a WARN at boot if it happens). Full wiring in `接线图.md`.
+V16 uses **one bus** for both servos (IDs distinguish them); the legacy stepper path uses two
+UARTs. Never connect/enable both paths at once. Full wiring in `接线图.md`.

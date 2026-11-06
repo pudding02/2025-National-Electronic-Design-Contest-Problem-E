@@ -6,6 +6,12 @@ description: "【已弃用·存档】原：在庐山派K230(CanMV/MicroPython)�
 > ⚠️ **已弃用**：本项目云台 pitch 轴已从 FashionStar 总线舵机改为 **Emm42_V5.0 闭环步进**（双步进方案）。
 > 当前实现与接线见项目根目录 `接线图.md` 与 `k230/main.py`；本文件仅作**历史存档**，以及给「仍使用总线舵机的其它项目」参考。
 
+> **平台说明（2026-11）**：本项目当前板卡是 **MaixCAM2（MaixPy v4）**，生产实现是
+> `k230/main.py` 的 `FashionStarBus` / `FashionStarServo`（`maix.uart` + `pinmap`，
+> `/dev/ttyS2`，B0/B1，115200）。下面第 3 章的 `machine.UART` / `FPIOA` 代码是
+> **庐山派 K230** 的历史实现，只作协议/用法参考，不要直接拷到 MaixCAM2。
+> 双舵机接线见 `接线图.md` 第零节 / `云台/舵机接线图_MaixCAM2.png`。
+
 # FashionStar 总线舵机 — 庐山派 K230 直控 Skill
 
 ## 0. 适用场景与边界

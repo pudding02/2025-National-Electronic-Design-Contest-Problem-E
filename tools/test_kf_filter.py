@@ -20,7 +20,7 @@ import unittest
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _MAIN_PY = os.path.normpath(os.path.join(_THIS_DIR, "..", "k230", "main.py"))
 
-_FUNC_NAMES = ("kf_step", "_kf_clear")
+_FUNC_NAMES = ("kf_step", "_kf_clear", "_tdiff")
 
 # main.py 必须模块级定义的 KF 参数/状态名(静态守门用)
 _KF_PARAM_VARS = ("KF_Y_EN", "KF_Y_QPOS", "KF_Y_QVEL", "KF_Y_R", "KF_Y_LEAD", "KF_Y_LIM",

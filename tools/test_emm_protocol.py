@@ -76,7 +76,7 @@ class FakeUART:
     def any(self):
         return len(self.rx)
 
-    def read(self, n=None):
+    def read(self, n=None, timeout=0):
         if n is None:
             d = bytes(self.rx)
             self.rx = bytearray()
@@ -84,6 +84,16 @@ class FakeUART:
         d = bytes(self.rx[:n])
         del self.rx[:n]
         return d
+
+
+class FakePinmap:
+    def set_pin_function(self, pin, fn):
+        self.last_map = (pin, fn)
+        return 0
+
+
+class FakeUartModule:
+    UART = FakeUART
 
 
 class FakeFPIOA:
@@ -109,7 +119,8 @@ def load_emm_class():
         src = f.read()
     const_src, class_src = _extract_parts(src)
     _install_stubs()
-    env = {"time": _FakeTime()}
+    env = {"time": _FakeTime(), "pinmap": FakePinmap(), "uart": FakeUartModule(),
+           "_tdiff": lambda a, b: a - b}
     exec(const_src, env)
     exec(class_src, env)
     return env["EmmStepper"]

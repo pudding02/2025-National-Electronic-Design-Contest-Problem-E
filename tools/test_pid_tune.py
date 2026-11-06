@@ -32,10 +32,11 @@ _FUNC_NAMES = (
     "param_value", "param_apply", "param_save_items",
     "_replace_json_token", "param_save_text",
     "param_step", "_param_rects",
+    "_tdiff",
 )
 
 # 被提取函数引用的模块级常量表(一并从 main.py 提取执行 —— 测试不自造取值, 缺定义即暴露)
-_CONST_NAMES = ("PARAM_ITEMS", "PARAM_NAMES", "PARAM_SPEC")
+_CONST_NAMES = ("PARAM_ITEMS", "PARAM_NAMES", "PARAM_SPEC", "PARAM_ATT_ITEMS")
 
 # 触屏调参读写的运行时全局(注入初值 = config 默认量级); param_apply 会写回本 env
 _TUNE_VARS = {
@@ -43,6 +44,8 @@ _TUNE_VARS = {
     "M_MAX_RPM": 60, "M_MIN_RPM": 5, "M_DEADBAND": 5, "M_ACC": 200, "M_DX_FULL": 200,
     "P_PID_EN": True, "P_PID_KP": 0.14, "P_PID_KI": 0.0, "P_PID_KD": 0.0,
     "P_MAX_RPM": 30, "P_MIN_RPM": 3, "P_DEADBAND": 5, "P_ACC": 200, "P_DY_FULL": 200,
+    # V15 姿态三项(param_value/param_apply 读写; _att_bind 用测试桩, 见 reset_env)
+    "ATT_EN": False, "ATT_ANGLE_KP": 12.0, "ATT_DEADBAND_DPS": 3.0,
 }
 # main.py 必须模块级定义的调参相关名字(静态守门用; _pid_* 为 PID 运行状态)
 _STATE_VARS = ("_pid_yaw_i", "_pid_yaw_e", "_pid_yaw_t",
@@ -109,9 +112,19 @@ def load_funcs():
 
 def reset_env():
     """把触屏调参变量恢复为初值(每个用例前调用, 防跨用例污染)"""
+    if _ENV is None:              # 首个用例可能在任何函数被加载前就调 reset_env
+        F("pid_step")             # 走 F() 而不是 load_funcs(): 后者不会缓存 _FNS,
+                                  # 会导致下一次 F() 重建 env 并丢掉下面注入的桩
     _ENV.update(_TUNE_VARS)
     _ENV["_yaw"] = None
     _ENV["_pitch"] = None
+    _ENV["_att_bind"] = _fake_att_bind
+
+
+def _fake_att_bind(on):
+    """main.py 的 _att_bind 桩: 只把开关写回 env(真实现依赖 IMU/电机实例)"""
+    _ENV["ATT_EN"] = bool(on)
+    return True
 
 
 _FNS = None
@@ -226,8 +239,18 @@ class TestParamNextCalc(unittest.TestCase):
         self.assertEqual(f("pid"), "kp")
         self.assertEqual(f("kp"), "ki")
         self.assertEqual(f("kd"), "max")
-        self.assertEqual(f("full"), "pid")
+        self.assertEqual(f("full"), "att")     # V15: full 之后接姿态三项
+        self.assertEqual(f("adz"), "pid")      # 表尾回卷
         self.assertEqual(f("unknown"), "pid")
+
+    def test_next_skips_attitude_items_on_pitch(self):
+        # V15: pitch 轴跳过 att/akp/adz(只对 yaw 有效), 免得出现按了没反应的死键
+        f = F("param_next")
+        self.assertEqual(f("full", 1), "pid")
+        self.assertEqual(f("att", 1), "pid")
+        self.assertEqual(f("akp", 1), "pid")
+        self.assertEqual(f("adz", 1), "pid")
+        self.assertEqual(f("kp", 1), "ki")
 
     def test_calc_float_step_and_round(self):
         f = F("param_calc")
@@ -308,14 +331,14 @@ class TestParamValueApply(unittest.TestCase):
 
 
 class TestParamSaveItems(unittest.TestCase):
-    """param_save_items 收集 18 项; 键集必须与真 config 对齐(防 S 保存永远失败)"""
+    """param_save_items 收集 21 项; 键集必须与真 config 对齐(防 S 保存永远失败)"""
 
     def setUp(self):
         reset_env()
 
     def test_collect_and_values(self):
         items = F("param_save_items")()
-        self.assertEqual(len(items), 18)
+        self.assertEqual(len(items), 21)
         d = dict(((sec + "." + k), t) for sec, k, t in items)
         self.assertEqual(d["motor.pid_enabled"], "false")
         self.assertEqual(d["pitch_motor.pid_enabled"], "true")
@@ -324,6 +347,10 @@ class TestParamSaveItems(unittest.TestCase):
         self.assertEqual(d["motor.max_rpm"], "60")
         self.assertEqual(d["pitch_motor.dy_full_px"], "200")
         self.assertEqual(d["motor.acc"], "200")
+        # V15 姿态三项
+        self.assertEqual(d["attitude.enabled"], "false")
+        self.assertEqual(d["attitude.angle_kp"], "12")
+        self.assertEqual(d["attitude.deadband_dps"], "3")
 
     def test_keys_exist_in_real_config(self):
         with open(_CFG_JSON, encoding="utf-8") as f:
@@ -333,18 +360,60 @@ class TestParamSaveItems(unittest.TestCase):
             self.assertIn(key, cfg[sec], "config.json 缺键: %s.%s" % (sec, key))
 
     def test_save_items_roundtrip_real_config(self):
-        """集成: param_save_items 的 18 项文本对真 config 必须全部命中(S 键真实路径)"""
+        """集成: param_save_items 的 21 项文本对真 config 必须全部命中(S 键真实路径)"""
         with open(_CFG_JSON, encoding="utf-8") as f:
             src = f.read()
         out = F("param_save_text")(src, F("param_save_items")())
-        self.assertIsNotNone(out, "18 项对真 config 有未命中键(键名/段名不符)")
+        self.assertIsNotNone(out, "21 项对真 config 有未命中键(键名/段名不符)")
         cfg = json.loads(out)
         self.assertEqual(cfg["motor"]["pid_kp"], 0.28)
         self.assertEqual(cfg["pitch_motor"]["pid_kp"], 0.14)
         self.assertIs(cfg["motor"]["pid_enabled"], False)
 
 
+class TestAttitudeTuneItems(unittest.TestCase):
+    """V15 姿态三项(att/akp/adz): 开关语义 / 步进 / 读写 / 只对 yaw 生效"""
+
+    def setUp(self):
+        reset_env()
+
+    def test_fmt_disp_switch(self):
+        self.assertEqual(F("fmt_disp")("att", 1), "ON")
+        self.assertEqual(F("fmt_disp")("att", 0), "OFF")
+
+    def test_calc_toggle(self):
+        self.assertEqual(F("param_calc")("att", 0, 1), 1)
+        self.assertEqual(F("param_calc")("att", 1, -1), 0)
+
+    def test_calc_step_and_clamp(self):
+        self.assertEqual(F("param_calc")("akp", 12.0, 1), 13.0)
+        self.assertEqual(F("param_calc")("adz", 3.0, -1), 2.5)
+        self.assertEqual(F("param_calc")("adz", 0.0, -1), 0.0)     # 下限
+        self.assertEqual(F("param_calc")("akp", 60.0, 1), 60.0)    # 上限
+
+    def test_value_read(self):
+        self.assertEqual(F("param_value")(0, "att"), 0)
+        self.assertEqual(F("param_value")(0, "akp"), 12.0)
+        self.assertEqual(F("param_value")(0, "adz"), 3.0)
+        self.assertEqual(F("param_value")(1, "akp"), 0)            # pitch 轴无此项
+
+    def test_apply_writes_globals(self):
+        self.assertEqual(F("param_apply")(0, "akp", 1), 13.0)
+        self.assertEqual(ENV()["ATT_ANGLE_KP"], 13.0)
+        self.assertEqual(F("param_apply")(0, "adz", -1), 2.5)
+        self.assertEqual(ENV()["ATT_DEADBAND_DPS"], 2.5)
+
+    def test_apply_toggle_att(self):
+        self.assertEqual(F("param_apply")(0, "att", 1), 1)
+        self.assertTrue(ENV()["ATT_EN"])
+        self.assertEqual(F("param_apply")(0, "att", -1), 0)
+        self.assertFalse(ENV()["ATT_EN"])
+
+
+
 class TestReplaceJsonToken(unittest.TestCase):
+    """config.json 文本级 token 替换(触屏保存的底层原语)"""
+
     def test_int_replace(self):
         self.assertEqual(F("_replace_json_token")('    "v": 5,', "7"),
                          '    "v": 7,')
@@ -481,45 +550,47 @@ class TestParamRects(unittest.TestCase):
 
 
 class TestParamStep(unittest.TestCase):
-    """签名: param_step(vis, btn, hold_t0, last_btn, now, pressed, was_pressed, hit, repeat_ms, guard_ms)
+    """签名: param_step(vis, btn, hold_t0, last_btn, now, pressed, was_pressed,
+                        hit, repeat_ms, guard_ms, act_t) → (vis, btn, hold, last, act_t, action)
 
     规则同 calib_step; 连发按钮 = plus/minus; item/axis/save/back 单发;
-    防抖(guard_ms): 与最近一次发出动作的同一按钮、间隔 < guard_ms 的再次按沿被吞
-    (防触摸抖动"一下跳两项"); 换钮不受限。
+    防抖(guard_ms): 与最近一次发出动作(act_t)的同一按钮、间隔 < guard_ms 的再次按沿被吞
+    (防触摸抖动"一下跳两项"); 换钮不受限。act_t 由调用方穿线(0=尚无动作)。
     """
 
     def test_plus_repeat(self):
         f = F("param_step")
-        self.assertEqual(f(True, None, 0, None, 1000, True, False, "plus", 120, 300),
-                         (True, "plus", 1000, "plus", "plus"))
-        self.assertEqual(f(True, "plus", 1000, "plus", 1090, True, True, "plus", 120, 300),
-                         (True, "plus", 1000, "plus", None))
-        self.assertEqual(f(True, "plus", 1000, "plus", 1120, True, True, "plus", 120, 300),
-                         (True, "plus", 1120, "plus", "plus"))
+        self.assertEqual(f(True, None, 0, None, 1000, True, False, "plus", 120, 300, 0),
+                         (True, "plus", 1000, "plus", 1000, "plus"))
+        self.assertEqual(f(True, "plus", 1000, "plus", 1090, True, True, "plus", 120, 300, 1000),
+                         (True, "plus", 1000, "plus", 1000, None))
+        self.assertEqual(f(True, "plus", 1000, "plus", 1120, True, True, "plus", 120, 300, 1000),
+                         (True, "plus", 1120, "plus", 1120, "plus"))
 
     def test_minus_repeat(self):
         f = F("param_step")
-        self.assertEqual(f(True, "minus", 1000, "minus", 1120, True, True, "minus", 120, 300),
-                         (True, "minus", 1120, "minus", "minus"))
+        self.assertEqual(f(True, "minus", 1000, "minus", 1120, True, True, "minus", 120, 300, 1000),
+                         (True, "minus", 1120, "minus", 1120, "minus"))
 
     def test_single_fire_buttons(self):
         f = F("param_step")
         for name in ("item", "axis", "save", "back"):
-            self.assertEqual(f(True, None, 0, None, 1000, True, False, name, 120, 300),
-                             (True, name, 1000, name, name), name)
-            self.assertEqual(f(True, name, 1000, name, 1500, True, True, name, 120, 300),
-                             (True, name, 1000, name, None), name)
+            self.assertEqual(f(True, None, 0, None, 1000, True, False, name, 120, 300, 0),
+                             (True, name, 1000, name, 1000, name), name)
+            self.assertEqual(f(True, name, 1000, name, 1500, True, True, name, 120, 300, 1000),
+                             (True, name, 1000, name, 1000, None), name)
 
     def test_hidden_wake_edge(self):
         f = F("param_step")
-        self.assertEqual(f(False, None, 0, None, 1000, True, False, None, 120, 300),
-                         (True, None, 1000, None, None))
-        self.assertEqual(f(False, "back", 900, "back", 1000, True, True, "back", 120, 300),
-                         (False, None, 900, "back", None))
+        self.assertEqual(f(False, None, 0, None, 1000, True, False, None, 120, 300, 0),
+                         (True, None, 1000, None, 0, None))
+        self.assertEqual(f(False, "back", 900, "back", 1000, True, True, "back", 120, 300, 950),
+                         (False, None, 900, "back", 950, None))
 
     def test_release_clears(self):
-        self.assertEqual(F("param_step")(True, "plus", 900, "plus", 1000, False, True, None, 120, 300),
-                         (True, None, 900, "plus", None))
+        self.assertEqual(F("param_step")(True, "plus", 900, "plus", 1000,
+                                         False, True, None, 120, 300, 900),
+                         (True, None, 900, "plus", 900, None))
 
 
 class TestParamDebounce(unittest.TestCase):
@@ -530,39 +601,53 @@ class TestParamDebounce(unittest.TestCase):
     def test_same_button_within_guard_swallowed(self):
         f = F("param_step")
         # 真点击 item(动作) → 松开 → 160ms 后同钮伪按沿(触摸抖动) → 吞
-        _, btn, hold, last, act = f(True, None, 0, None, 1000, True, False, "item", 120, self.GD)
+        _, btn, hold, last, actt, act = f(True, None, 0, None, 1000, True, False,
+                                          "item", 120, self.GD, 0)
         self.assertEqual((btn, act), ("item", "item"))
-        _, btn, hold, last, _ = f(True, btn, hold, last, 1060, False, True, None, 120, self.GD)
-        _, btn, hold, last, act = f(True, btn, hold, last, 1160, True, False, "item", 120, self.GD)
+        self.assertEqual(actt, 1000)
+        _, btn, hold, last, actt, _ = f(True, btn, hold, last, 1060, False, True,
+                                        None, 120, self.GD, actt)
+        _, btn, hold, last, actt, act = f(True, btn, hold, last, 1160, True, False,
+                                          "item", 120, self.GD, actt)
         self.assertIsNone(act)                       # 距上次动作 160ms < 300 → 吞
         self.assertEqual((btn, last), ("item", "item"))
         # 距上次动作 310ms 的同钮按下 → 放行(用户真点击第二下)
-        _, _, _, _, act = f(True, None, hold, last, 1310, True, False, "item", 120, self.GD)
+        _, _, _, _, _, act = f(True, None, hold, last, 1310, True, False,
+                               "item", 120, self.GD, actt)
         self.assertEqual(act, "item")
 
     def test_swallowed_then_hold_repeats(self):
         f = F("param_step")
-        _, btn, hold, last, act = f(True, None, 0, None, 1000, True, False, "plus", 120, self.GD)
+        _, btn, hold, last, actt, act = f(True, None, 0, None, 1000, True, False,
+                                          "plus", 120, self.GD, 0)
         self.assertEqual(act, "plus")
-        _, btn, hold, last, _ = f(True, btn, hold, last, 1060, False, True, None, 120, self.GD)
-        _, btn, hold, last, act = f(True, btn, hold, last, 1160, True, False, "plus", 120, self.GD)
+        _, btn, hold, last, actt, _ = f(True, btn, hold, last, 1060, False, True,
+                                        None, 120, self.GD, actt)
+        _, btn, hold, last, actt, act = f(True, btn, hold, last, 1160, True, False,
+                                          "plus", 120, self.GD, actt)
         self.assertIsNone(act)                       # 伪按沿被吞
-        _, _, _, _, act = f(True, btn, hold, last, 1180, True, True, "plus", 120, self.GD)
+        _, _, _, _, _, act = f(True, btn, hold, last, 1180, True, True,
+                               "plus", 120, self.GD, actt)
         self.assertEqual(act, "plus")                # 被吞后按住: 连发通道不受防抖影响
 
     def test_switch_button_not_blocked(self):
         f = F("param_step")
-        _, btn, hold, last, act = f(True, None, 0, None, 1000, True, False, "item", 120, self.GD)
+        _, btn, hold, last, actt, act = f(True, None, 0, None, 1000, True, False,
+                                          "item", 120, self.GD, 0)
         self.assertEqual(act, "item")
-        _, btn, hold, last, _ = f(True, btn, hold, last, 1030, False, True, None, 120, self.GD)
-        _, _, _, _, act = f(True, btn, hold, last, 1080, True, False, "plus", 120, self.GD)
+        _, btn, hold, last, actt, _ = f(True, btn, hold, last, 1030, False, True,
+                                        None, 120, self.GD, actt)
+        _, _, _, _, _, act = f(True, btn, hold, last, 1080, True, False,
+                               "plus", 120, self.GD, actt)
         self.assertEqual(act, "plus")                # 换钮 80ms 内立即放行(不误伤)
 
     def test_guard_zero_disables(self):
         f = F("param_step")
-        _, _, _, _, act = f(True, None, 0, None, 1000, True, False, "item", 120, 0)
+        _, _, _, _, actt, act = f(True, None, 0, None, 1000, True, False,
+                                  "item", 120, 0, 0)
         self.assertEqual(act, "item")
-        _, _, _, _, act = f(True, None, 1060, "item", 1160, True, False, "item", 120, 0)
+        _, _, _, _, _, act = f(True, None, 1060, "item", 1160, True, False,
+                               "item", 120, 0, actt)
         self.assertEqual(act, "item")                # guard=0 → 旧行为(同钮快速重复也放行)
 
 
